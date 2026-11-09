@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project data and checkpoints (do not commit large artifacts)
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.npz
+*.pkl
+
+# Selected lightweight reproduction assets
+!/examples/checkpoints/mlp/best_model.pt
+!/examples/checkpoints/deepsets/best_model.pt
+!/examples/checkpoints/ppinn/best_ppinn.pt
+!/examples/checkpoints/pod/pod_model.npz
+!/examples/data/mesh.h5
+
+# Local machine path configuration (override from paths.example.json)
+configs/paths.json
+
+# Outputs & Run artifacts
+output/
+outputs/
+runs/
+p1_runs/
+tmp/
+tmp*/
+logs/
+*.log
+
+# Local refactoring notes
+/REFACTOR.md

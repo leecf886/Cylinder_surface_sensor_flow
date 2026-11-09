@@ -1,0 +1,105 @@
+{
+   "files" : [
+      {
+         "kind" : "checkpoint",
+         "path" : "examples/checkpoints/mlp/best_model.pt",
+         "sha256" : "15f58e1dc9cdfc81804035994852beb6520c52c0582f081c39495c9c5cd8df2d",
+         "size_bytes" : 148276,
+         "source_path" : "wp_a_scheme_a/09_unified_test_recovery_v1/main/models/mlp/uniform/ns6/07443419c591cbc4/seed_706042/best_model.pt",
+         "source_sha256" : "15f58e1dc9cdfc81804035994852beb6520c52c0582f081c39495c9c5cd8df2d",
+         "transformation" : "byte-for-byte copy"
+      },
+      {
+         "kind" : "checkpoint",
+         "path" : "examples/checkpoints/deepsets/best_model.pt",
+         "sha256" : "0049e5e5e8866c6c5e11625cf07fac21eba98d7d9be204c53b7497b2a3c45299",
+         "size_bytes" : 359266,
+         "source_path" : "wp_a_scheme_a/02_dynamic_encoder/default/best_model.pt",
+         "source_sha256" : "0049e5e5e8866c6c5e11625cf07fac21eba98d7d9be204c53b7497b2a3c45299",
+         "transformation" : "byte-for-byte copy"
+      },
+      {
+         "kind" : "checkpoint",
+         "path" : "examples/checkpoints/ppinn/best_ppinn.pt",
+         "sha256" : "219a0e3371684ac4673069dd1278c2a4c17992d91a86c7ce1e7de75878833b71",
+         "size_bytes" : 340498,
+         "source_path" : "wp_a_scheme_a/01_ppinn_selection/ppinn_selection/best_ppinn.pt",
+         "source_sha256" : "219a0e3371684ac4673069dd1278c2a4c17992d91a86c7ce1e7de75878833b71",
+         "transformation" : "byte-for-byte copy"
+      },
+      {
+         "kind" : "checkpoint",
+         "path" : "examples/checkpoints/pod/pod_model.npz",
+         "sha256" : "4c622c5f38cce93a8dd9aa2c7d6d82e9a4345d25892d294e08b1c901cd8c6529",
+         "size_bytes" : 4842847,
+         "source_path" : "wp_a_scheme_a/03_pod_prerequisite/default/pod_model.npz",
+         "source_sha256" : "4c622c5f38cce93a8dd9aa2c7d6d82e9a4345d25892d294e08b1c901cd8c6529",
+         "transformation" : "byte-for-byte copy"
+      },
+      {
+         "kind" : "mesh",
+         "path" : "examples/data/mesh.h5",
+         "sha256" : "e50aa39ea4dbf644fd7b621368d35f295870fba52ffb5794f6e21835927749c3",
+         "size_bytes" : 791371,
+         "source_path" : "processed_data_base_60/mesh.h5",
+         "source_sha256" : "e50aa39ea4dbf644fd7b621368d35f295870fba52ffb5794f6e21835927749c3",
+         "transformation" : "byte-for-byte copy"
+      },
+      {
+         "kind" : "metadata",
+         "path" : "examples/checkpoints/mlp/checkpoint_meta.json",
+         "sha256" : "216fec184af06cf9b3ca64660246b3056324df2978769e21613083a0d1c01228",
+         "size_bytes" : 3171,
+         "source_path" : "wp_a_scheme_a/09_unified_test_recovery_v1/main/models/mlp/uniform/ns6/07443419c591cbc4/seed_706042/checkpoint_meta.json",
+         "source_sha256" : "cad2160cf40b852db029208aa1a4e0e3b9804c2ef390922e1d68365acc5c1b02",
+         "transformation" : "JSON reformatted; filesystem paths made repository-relative; numerical settings preserved"
+      },
+      {
+         "kind" : "metadata",
+         "path" : "examples/checkpoints/deepsets/config.json",
+         "sha256" : "582069bbeb21afdc1d04de4106fd98b4e6f49d1cd18ff05be607187dd99ef2a1",
+         "size_bytes" : 56450,
+         "source_path" : "wp_a_scheme_a/02_dynamic_encoder/default/config.json",
+         "source_sha256" : "4e7a2ef8f6e7f601beff6fc01f3e4264ce30e4996f1a21794b15b5fde78818ad",
+         "transformation" : "JSON reformatted; filesystem paths made repository-relative; numerical settings preserved"
+      },
+      {
+         "kind" : "metadata",
+         "path" : "examples/checkpoints/ppinn/config.json",
+         "sha256" : "87d238b6c34a07208982c697dacf38d21c4f5417fb48093620a317c742df8c76",
+         "size_bytes" : 2355,
+         "source_path" : "wp_a_scheme_a/01_ppinn_selection/ppinn_selection/config.json",
+         "source_sha256" : "39d6b0160f4cb723201611d4e4d9de4f35b12b26e2deb87db3a1d9819c23d0b5",
+         "transformation" : "JSON reformatted; filesystem paths made repository-relative; numerical settings preserved"
+      },
+      {
+         "kind" : "metadata",
+         "path" : "examples/checkpoints/pod/eval_config.json",
+         "sha256" : "b9a8a4d30056cad0c66672b8449d096a220f382bb76e4690b50a47ed857d17d5",
+         "size_bytes" : 2202,
+         "source_path" : "wp_a_scheme_a/03_pod_prerequisite/default/eval_config.json",
+         "source_sha256" : "53123e14edf9a7774c9762ddd02bd4b51a50fc25cb09e2e7be720eed8c98ca4c",
+         "transformation" : "JSON reformatted; filesystem paths made repository-relative; numerical settings preserved"
+      },
+      {
+         "kind" : "metadata",
+         "path" : "examples/checkpoints/pod/pod_model_info.json",
+         "sha256" : "12c16714027502bd2b6921eccf70b44a532afddaa02fb87201dad6a9bdbfd0e5",
+         "size_bytes" : 13453,
+         "source_path" : "wp_a_scheme_a/03_pod_prerequisite/default/pod_model_info.json",
+         "source_sha256" : "ed048a76c961306e2b93700e802a37844f5cb196e1e6b403e120a317d9646b5c",
+         "transformation" : "JSON reformatted; filesystem paths made repository-relative; numerical settings preserved"
+      }
+   ],
+   "packaged_date" : "2026-11-09",
+   "path_base" : "repository root",
+   "reference_code_commit" : "5d73308",
+   "schema_version" : 1,
+   "source_path_base" : "external data root (see examples/README.md)",
+   "source_repository" : "https://github.com/leecf886/2d_surface_cylinder_flow",
+   "validation" : {
+      "binary_copy_sha256" : "passed",
+      "inference_parity" : "pending model migration",
+      "metadata_json_readback" : "passed"
+   }
+}

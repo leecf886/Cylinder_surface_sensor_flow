@@ -1,0 +1,95 @@
+{
+   "D" : 0.01,
+   "U_inf" : 1,
+   "data_dir" : "data/processed_data_base_60",
+   "defer_test_evaluation" : true,
+   "dense_eval_data_dir" : "",
+   "dense_eval_mesh_file" : "mesh.h5",
+   "dense_eval_re_list" : [
+      250,
+      650
+   ],
+   "enable_dense_grid_eval" : false,
+   "enable_physics_consistency_eval" : false,
+   "enable_ssim" : false,
+   "energy_ratio" : 0.999,
+   "frequency_re_coef_a" : -0.09758,
+   "frequency_re_coef_b" : 0.00244,
+   "log_level" : "INFO",
+   "max_modes" : 128,
+   "mesh_file" : "mesh.h5",
+   "min_modes" : 4,
+   "n_physics_eval_points" : 200000,
+   "notes" : {
+      "pod_explained_energy" : 0.999023343996046,
+      "pod_explained_energy_by_field" : {
+         "p" : 0.999044113553826,
+         "u" : 0.999013052871085,
+         "v" : 0.999012865563226
+      },
+      "pod_num_modes" : 74,
+      "pod_num_modes_by_field" : {
+         "p" : 24,
+         "u" : 29,
+         "v" : 21
+      },
+      "pod_output_dim" : 23691,
+      "roi_effective_bounds" : {
+         "x_max_m" : 0.0399980396032333,
+         "x_min_m" : -0.0149961337447166,
+         "y_max_m" : 0.0249800384044647,
+         "y_min_m" : -0.024998776614666
+      },
+      "roi_filter_bounds" : {
+         "eps_m" : 1e-12,
+         "x_max_m" : 0.04,
+         "x_min_m" : -0.015,
+         "y_max_m" : 0.025,
+         "y_min_m" : -0.025
+      },
+      "roi_points_full_mesh" : 7897,
+      "roi_points_kept" : 7897,
+      "sensor_input_dim" : 180
+   },
+   "output_dir" : "runs/examples/pod",
+   "physics_eval_seed" : 2026,
+   "pressure_scale_mode" : "rho_uinf2",
+   "re_fold_id" : "default",
+   "rho" : 1000,
+   "ridge_lambda" : 1e-06,
+   "roi_filter_eps" : 1e-12,
+   "roi_x_max" : 0.04,
+   "roi_x_min" : -0.015,
+   "roi_y_max" : 0.025,
+   "roi_y_min" : -0.025,
+   "seed" : 42,
+   "smoke_not_for_formal" : false,
+   "ssim_max_snapshots_per_case" : 0,
+   "strict_re_split" : true,
+   "test_re" : [
+      250,
+      650
+   ],
+   "train_re" : [
+      200,
+      225,
+      275,
+      300,
+      350,
+      400,
+      500,
+      550,
+      600,
+      700,
+      750,
+      850,
+      900,
+      1000
+   ],
+   "use_st_formula" : false,
+   "val_re" : [
+      450,
+      800
+   ],
+   "x_norm_method" : "standard"
+}

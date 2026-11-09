@@ -1,0 +1,20 @@
+{
+  "default": {
+    "train_re": [200, 225, 275, 300, 350, 400, 500, 550, 600, 700, 750, 850, 900, 1000],
+    "val_re": [450, 800],
+    "test_re": [250, 650],
+    "purpose": "Default train/val/test interpolation split"
+  },
+  "loo_450": {
+    "train_re": [200, 225, 275, 300, 350, 400, 500, 550, 600, 700, 750, 800, 850, 900, 1000],
+    "val_re": [450],
+    "test_re": [250, 650],
+    "purpose": "Leave-one-out fold holding Re=450 for validation"
+  },
+  "loo_800": {
+    "train_re": [200, 225, 275, 300, 350, 400, 450, 500, 550, 600, 700, 750, 850, 900, 1000],
+    "val_re": [800],
+    "test_re": [250, 650],
+    "purpose": "Leave-one-out fold holding Re=800 for validation"
+  }
+}

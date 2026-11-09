@@ -1,0 +1,144 @@
+{
+   "best_epoch" : 7,
+   "candidate_theta_fingerprint" : "bc3afbd44ad6eaa44e94a79674b20cdf41e154c74eea3e18677fece78ca37405",
+   "checkpoint" : "examples/checkpoints/mlp/best_model.pt",
+   "encoder" : "mlp",
+   "hidden_dims" : [
+      128,
+      128,
+      128
+   ],
+   "layout_id" : "07443419c591cbc4",
+   "nsensor" : 6,
+   "re_fold_id" : "default",
+   "re_norm_method" : "standard",
+   "re_normalizer" : {
+      "fitted" : true,
+      "max" : null,
+      "mean" : [
+         518.551797040169
+      ],
+      "method" : "standard",
+      "min" : null,
+      "std" : [
+         254.354884712222
+      ]
+   },
+   "re_split" : {
+      "test_re" : [
+         250,
+         650
+      ],
+      "train_re" : [
+         200,
+         225,
+         275,
+         300,
+         350,
+         400,
+         500,
+         550,
+         600,
+         700,
+         750,
+         850,
+         900,
+         1000
+      ],
+      "val_re" : [
+         450,
+         800
+      ]
+   },
+   "selection_seed" : 42,
+   "sensor_indices" : [
+      0,
+      10,
+      20,
+      30,
+      40,
+      50
+   ],
+   "source_run_ids" : [
+      "layout-search__default__20260722T135816__b0ac9f"
+   ],
+   "strategy" : "uniform",
+   "train_repeat_id" : 0,
+   "train_seed" : 706042,
+   "training_mode" : "from_scratch",
+   "training_protocol" : {
+      "batch_size" : 512,
+      "early_stopping_min_delta" : 1e-06,
+      "early_stopping_patience" : 0,
+      "encoder" : "mlp",
+      "hidden_dims" : [
+         128,
+         128,
+         128
+      ],
+      "lambda_phase" : 1,
+      "lambda_re" : 1,
+      "learning_rate" : 0.001,
+      "num_epochs" : 200,
+      "re_norm_method" : "standard",
+      "set_embed_dim" : 128,
+      "set_phi_hidden" : [
+         128,
+         128
+      ],
+      "set_pool" : "mean",
+      "set_rho_hidden" : [
+         128,
+         128
+      ],
+      "weight_decay" : 0,
+      "x_norm_method" : "standard"
+   },
+   "x_norm_method" : "standard",
+   "x_normalizer" : {
+      "fitted" : true,
+      "max" : null,
+      "mean" : [
+         0.000248971590656403,
+         0.000653105378420039,
+         -2.67964100631556,
+         -0.000655992430625418,
+         0.000368220994132549,
+         -2.09027307277671,
+         0.0133328207278534,
+         0.00789316599838547,
+         -1.9903231043555,
+         0.000476263011606643,
+         -2.17470483267952e-05,
+         1.83913116630526,
+         0.0133597048514223,
+         -0.00791014367020668,
+         -2.00555774756432,
+         -0.000668013203643392,
+         -0.000373202523947196,
+         -2.09917406410955
+      ],
+      "method" : "standard",
+      "min" : null,
+      "std" : [
+         0.000788676804489997,
+         0.00921113883410908,
+         2.85198740886212,
+         0.00112030189471995,
+         0.000596962205723683,
+         2.41099093099241,
+         0.00994207521691556,
+         0.00575006751779974,
+         2.11251912205849,
+         0.000400718325474811,
+         0.00120962307207372,
+         1.61840700807714,
+         0.00995696254619831,
+         0.00575938772666304,
+         2.1200718921945,
+         0.00113709067361352,
+         0.000607946677150746,
+         2.41201261497054
+      ]
+   }
+}

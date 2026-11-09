@@ -1,0 +1,11 @@
+{
+  "_comment": "Template for local machine data and output path overrides. Copy to paths.json.",
+  "data_root": "./data",
+  "processed_dir": "./data/processed_data_base_60",
+  "runs_dir": "./runs",
+  "checkpoints": {
+    "mlp": "./runs/mlp_runs",
+    "pinn": "./runs/pinn_runs",
+    "pod": "./runs/pod_runs"
+  }
+}
