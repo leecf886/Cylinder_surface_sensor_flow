@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -219,3 +219,282 @@ def detect_cycles_from_phase(
             complete.append(bool(starts_at_wrap and ends_at_wrap))
 
     return CycleInfo(cycle_ids=cycle_ids, complete=complete, boundaries=boundaries)
+
+
+@dataclass
+class RawSnapshotAccum:
+    """Raw per-snapshot error accumulators for ONE snapshot.
+
+    These are the raw quantities from which rel-L2 and gauge metrics are derived.
+    Storing them per-snapshot allows correct per-cycle / per-Re re-aggregation
+    by summing the SSE/ref quantities across snapshots and taking sqrt at the end
+    (NOT averaging per-snapshot rel-L2).
+    """
+
+    u_err2: float = 0.0
+    v_err2: float = 0.0
+    u_ref2: float = 0.0
+    v_ref2: float = 0.0
+    data_err2_sum: float = 0.0
+    n_points: int = 0
+    # Pressure gauge Welford stats for this snapshot
+    p_mean_e: float = 0.0
+    p_m2_e: float = 0.0
+    p_mean_p: float = 0.0
+    p_m2_p: float = 0.0
+    p_n: int = 0
+
+
+def build_raw_snapshot_accum(
+    pred_uvp: np.ndarray,
+    true_uvp: np.ndarray,
+) -> RawSnapshotAccum:
+    """Build a RawSnapshotAccum instance from a single snapshot of [N, 3] fields.
+
+    Parameters:
+        pred_uvp: Predicted (u, v, p) array of shape [N, 3].
+        true_uvp: Reference (u, v, p) array of shape [N, 3].
+
+    Returns:
+        Populated RawSnapshotAccum.
+    """
+    p = np.asarray(pred_uvp, dtype=np.float64)
+    t = np.asarray(true_uvp, dtype=np.float64)
+    if p.shape != t.shape or p.ndim != 2 or p.shape[1] != 3:
+        raise ValueError(f"pred_uvp and true_uvp must be [N, 3], got {p.shape} and {t.shape}")
+
+    u_p, v_p, p_p = p[:, 0], p[:, 1], p[:, 2]
+    u_t, v_t, p_t = t[:, 0], t[:, 1], t[:, 2]
+
+    du = u_p - u_t
+    dv = v_p - v_t
+    dp = p_p - p_t
+
+    u_err2 = float(np.sum(du ** 2))
+    v_err2 = float(np.sum(dv ** 2))
+    p_err2 = float(np.sum(dp ** 2))
+    u_ref2 = float(np.sum(u_t ** 2))
+    v_ref2 = float(np.sum(v_t ** 2))
+    data_err2_sum = u_err2 + v_err2 + p_err2
+
+    n = int(p.shape[0])
+    if n > 0:
+        p_mean_e = float(np.mean(dp))
+        p_m2_e = float(np.sum((dp - p_mean_e) ** 2))
+        p_mean_p = float(np.mean(p_t))
+        p_m2_p = float(np.sum((p_t - p_mean_p) ** 2))
+    else:
+        p_mean_e = p_m2_e = p_mean_p = p_m2_p = 0.0
+
+    return RawSnapshotAccum(
+        u_err2=u_err2,
+        v_err2=v_err2,
+        u_ref2=u_ref2,
+        v_ref2=v_ref2,
+        data_err2_sum=data_err2_sum,
+        n_points=n,
+        p_mean_e=p_mean_e,
+        p_m2_e=p_m2_e,
+        p_mean_p=p_mean_p,
+        p_m2_p=p_m2_p,
+        p_n=n,
+    )
+
+
+def aggregate_metrics_from_raws(
+    raws: Sequence[RawSnapshotAccum],
+    eps: float = 1e-12,
+) -> Dict[str, float]:
+    """Re-aggregate field metrics from a sequence of raw per-snapshot accumulators.
+
+    Correctly computes relative L2 over combined snapshots as sqrt(sum(SSE) / sum(ref2))
+    rather than averaging snapshot relative L2. Gauge metrics aggregate per-snapshot
+    Welford moments into overall SSE.
+    """
+    u_err2 = v_err2 = 0.0
+    u_ref2 = v_ref2 = 0.0
+    data_err2_sum = 0.0
+    n_total = 0
+    raw_err_sse = 0.0
+    raw_ref_energy = 0.0
+    gauge_err_sse = 0.0
+    true_fluct_sse = 0.0
+    offset_abs_sum = 0.0
+    n_snap = 0
+
+    for r in raws:
+        u_err2 += r.u_err2
+        v_err2 += r.v_err2
+        u_ref2 += r.u_ref2
+        v_ref2 += r.v_ref2
+        data_err2_sum += r.data_err2_sum
+        n_total += r.n_points
+        n = r.p_n
+        if n > 0:
+            gauge_err_sse += max(r.p_m2_e, 0.0)
+            true_fluct_sse += max(r.p_m2_p, 0.0)
+            raw_err_sse += r.p_m2_e + n * r.p_mean_e * r.p_mean_e
+            raw_ref_energy += r.p_m2_p + n * r.p_mean_p * r.p_mean_p
+            offset_abs_sum += abs(r.p_mean_e)
+            n_snap += 1
+
+    u_rel = math.sqrt(u_err2 / (u_ref2 + eps))
+    v_rel = math.sqrt(v_err2 / (v_ref2 + eps))
+    p_rel_raw = math.sqrt(raw_err_sse / (raw_ref_energy + eps))
+    p_rel_gsd = math.sqrt(gauge_err_sse / (raw_ref_energy + eps))
+    if true_fluct_sse <= 0.0:
+        p_rel_gfd = float("nan")
+    else:
+        p_rel_gfd = math.sqrt(gauge_err_sse / true_fluct_sse)
+    p_offset = offset_abs_sum / max(n_snap, 1)
+    uv_err2 = u_err2 + v_err2
+
+    return {
+        "u_err2": float(u_err2),
+        "v_err2": float(v_err2),
+        "uv_err2": float(uv_err2),
+        "u_ref2": float(u_ref2),
+        "v_ref2": float(v_ref2),
+        "u_rel_l2": float(u_rel),
+        "v_rel_l2": float(v_rel),
+        "p_rel_l2": float(p_rel_gsd),
+        "p_rel_l2_raw": float(p_rel_raw),
+        "p_rel_l2_gauge_sameden": float(p_rel_gsd),
+        "p_rel_l2_gauge_fluctden": float(p_rel_gfd),
+        "p_gauge_offset_mean_abs": float(p_offset),
+        "overall_rel_l2": float((u_rel + v_rel + p_rel_gsd) / 3.0),
+        "overall_rel_l2_raw": float((u_rel + v_rel + p_rel_raw) / 3.0),
+        "overall_rel_l2_gauge_sameden": float((u_rel + v_rel + p_rel_gsd) / 3.0),
+        "overall_rel_l2_gauge_fluctden": float((u_rel + v_rel + p_rel_gfd) / 3.0),
+        "data_mse": float((uv_err2 + gauge_err_sse) / max(n_total * 3, 1)),
+        "data_mse_raw": float(data_err2_sum / max(n_total * 3, 1)),
+        "data_mse_gauge": float((uv_err2 + gauge_err_sse) / max(n_total * 3, 1)),
+        "n_points": int(n_total),
+        "n_snapshots": int(n_snap),
+        "p_raw_err_sse": float(raw_err_sse),
+        "p_raw_ref_energy": float(raw_ref_energy),
+        "p_gauge_err_sse": float(gauge_err_sse),
+        "p_true_fluct_sse": float(true_fluct_sse),
+        "p_offset_abs_sum": float(offset_abs_sum),
+        "p_n_snapshots": int(n_snap),
+    }
+
+
+def per_cycle_field_metrics(
+    raws: Sequence[RawSnapshotAccum],
+    cycle_info: CycleInfo,
+    eps: float = 1e-12,
+) -> List[Dict[str, Any]]:
+    """Re-aggregate per-cycle field metrics from per-snapshot raw accumulators.
+
+    Returns a list of dicts (one per cycle), each containing cycle_id,
+    complete_block flag, n_snapshots, and all field metrics computed by
+    summing raw SSE/ref within the cycle and then taking sqrt.
+    """
+    out: List[Dict[str, Any]] = []
+    for cid, (s, e) in enumerate(cycle_info.boundaries):
+        cycle_raws = [raws[t] for t in range(s, e + 1)]
+        m = aggregate_metrics_from_raws(cycle_raws, eps=eps)
+        out.append({
+            "cycle_id": int(cid),
+            "complete_block": bool(cycle_info.complete[cid]),
+            "n_snapshots": int(e - s + 1),
+            "snapshot_start": int(s),
+            "snapshot_end": int(e),
+            **m,
+        })
+    return out
+
+
+def per_re_from_per_cycle(
+    per_cycle_rows: Sequence[Dict[str, Any]],
+    *,
+    complete_only: bool = False,
+    eps: float = 1e-12,
+) -> Dict[str, float]:
+    """Re-aggregate per-Re metrics from per-cycle rows.
+
+    Parameters:
+        per_cycle_rows: Sequence of cycle metric dictionaries.
+        complete_only: If True, only cycles with `complete_block == True` are accumulated
+            (conforming to scientific vortex shedding cycle alignment rules). If False
+            (default), accumulates all cycles including partial edge segments (reproducing
+            full-case direct snapshot accumulation).
+        eps: Denominator non-zero floor.
+
+    Returns:
+        Dict of re-aggregated flow field metrics.
+    """
+    if complete_only:
+        rows_to_use = [r for r in per_cycle_rows if bool(r.get("complete_block", True))]
+    else:
+        rows_to_use = list(per_cycle_rows)
+
+    if not rows_to_use:
+        res = aggregate_metrics_from_raws([])
+        res["n_cycles"] = 0
+        res["n_complete_cycles"] = 0
+        return res
+
+    required_pressure = {
+        "p_raw_err_sse", "p_raw_ref_energy", "p_gauge_err_sse",
+        "p_true_fluct_sse", "p_offset_abs_sum", "p_n_snapshots",
+    }
+    missing = sorted(required_pressure - set(rows_to_use[0]))
+    if missing:
+        raise ValueError(
+            f"per-cycle rows lack raw pressure fields required for exact rebuild: {missing}"
+        )
+
+    u_err2 = sum(float(r["u_err2"]) for r in rows_to_use)
+    v_err2 = sum(float(r["v_err2"]) for r in rows_to_use)
+    u_ref2 = sum(float(r["u_ref2"]) for r in rows_to_use)
+    v_ref2 = sum(float(r["v_ref2"]) for r in rows_to_use)
+    n_points = sum(int(r["n_points"]) for r in rows_to_use)
+    data_err2_sum = sum(float(r.get("data_mse_raw", r["data_mse"])) * int(r["n_points"]) * 3 for r in rows_to_use)
+    raw_err_sse = sum(float(r["p_raw_err_sse"]) for r in rows_to_use)
+    raw_ref_energy = sum(float(r["p_raw_ref_energy"]) for r in rows_to_use)
+    gauge_err_sse = sum(float(r["p_gauge_err_sse"]) for r in rows_to_use)
+    true_fluct_sse = sum(float(r["p_true_fluct_sse"]) for r in rows_to_use)
+    offset_abs_sum = sum(float(r["p_offset_abs_sum"]) for r in rows_to_use)
+    p_n_snapshots = sum(int(r["p_n_snapshots"]) for r in rows_to_use)
+
+    u_rel = math.sqrt(u_err2 / (u_ref2 + eps))
+    v_rel = math.sqrt(v_err2 / (v_ref2 + eps))
+    p_raw = math.sqrt(raw_err_sse / (raw_ref_energy + eps))
+    p_gsd = math.sqrt(gauge_err_sse / (raw_ref_energy + eps))
+    p_gfd = math.sqrt(gauge_err_sse / true_fluct_sse) if true_fluct_sse > 0.0 else float("nan")
+
+    n_complete = sum(1 for r in rows_to_use if bool(r.get("complete_block", False)))
+
+    return {
+        "u_err2": float(u_err2),
+        "v_err2": float(v_err2),
+        "uv_err2": float(u_err2 + v_err2),
+        "u_ref2": float(u_ref2),
+        "v_ref2": float(v_ref2),
+        "u_rel_l2": float(u_rel),
+        "v_rel_l2": float(v_rel),
+        "p_rel_l2": float(p_gsd),
+        "p_rel_l2_raw": float(p_raw),
+        "p_rel_l2_gauge_sameden": float(p_gsd),
+        "p_rel_l2_gauge_fluctden": float(p_gfd),
+        "p_gauge_offset_mean_abs": float(offset_abs_sum / max(p_n_snapshots, 1)),
+        "overall_rel_l2": float((u_rel + v_rel + p_gsd) / 3.0),
+        "overall_rel_l2_raw": float((u_rel + v_rel + p_raw) / 3.0),
+        "overall_rel_l2_gauge_sameden": float((u_rel + v_rel + p_gsd) / 3.0),
+        "overall_rel_l2_gauge_fluctden": float((u_rel + v_rel + p_gfd) / 3.0),
+        "data_mse": float((u_err2 + v_err2 + gauge_err_sse) / max(n_points * 3, 1)),
+        "data_mse_raw": float(data_err2_sum / max(n_points * 3, 1)),
+        "data_mse_gauge": float((u_err2 + v_err2 + gauge_err_sse) / max(n_points * 3, 1)),
+        "n_points": int(n_points),
+        "n_snapshots": int(p_n_snapshots),
+        "n_cycles": int(len(rows_to_use)),
+        "n_complete_cycles": int(n_complete),
+        "p_raw_err_sse": float(raw_err_sse),
+        "p_raw_ref_energy": float(raw_ref_energy),
+        "p_gauge_err_sse": float(gauge_err_sse),
+        "p_true_fluct_sse": float(true_fluct_sse),
+        "p_offset_abs_sum": float(offset_abs_sum),
+        "p_n_snapshots": int(p_n_snapshots),
+    }
