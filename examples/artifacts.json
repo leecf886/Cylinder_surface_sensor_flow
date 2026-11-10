@@ -93,10 +93,8 @@
    ],
    "packaged_date" : "2026-11-09",
    "path_base" : "repository root",
-   "reference_code_commit" : "5d73308",
    "schema_version" : 1,
-   "source_path_base" : "external data root (see examples/README.md)",
-   "source_repository" : "https://github.com/leecf886/2d_surface_cylinder_flow",
+   "source_path_base" : "external data root (see README.md)",
    "validation" : {
       "binary_copy_sha256" : "passed",
       "inference_parity" : "pending model migration",

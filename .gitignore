@@ -60,5 +60,6 @@ tmp*/
 logs/
 *.log
 
-# Local refactoring notes
+# Local refactoring notes (internal AI and developer transition guides)
 /REFACTOR.md
+/docs/migration.md

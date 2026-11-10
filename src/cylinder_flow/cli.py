@@ -1,6 +1,7 @@
 """Command-line interface and argument parser for cylinder_flow."""
 import argparse
 import sys
+from cylinder_flow.config import get_path_config
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -8,6 +9,32 @@ def build_parser() -> argparse.ArgumentParser:
         prog="cylinder_flow",
         description="Cylinder Surface Sensor Flow Pipeline",
     )
+    # Global / path configuration options
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=None,
+        help="Root directory for dataset (overrides CYLINDER_DATA_ROOT and configs/paths.json)",
+    )
+    parser.add_argument(
+        "--processed-dir",
+        type=str,
+        default=None,
+        help="Directory for processed HDF5 files",
+    )
+    parser.add_argument(
+        "--runs-dir",
+        type=str,
+        default=None,
+        help="Root directory for run outputs and checkpoints",
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to custom JSON configuration file",
+    )
+
     subparsers = parser.add_subparsers(dest="subcommand", help="Available subcommands")
 
     # Workflow commands
@@ -31,7 +58,16 @@ def main(argv=None):
     if args.subcommand is None:
         parser.print_help()
         sys.exit(0)
+
+    cfg = get_path_config(
+        config_path=args.config,
+        data_dir=args.data_dir,
+        processed_dir=args.processed_dir,
+        runs_dir=args.runs_dir,
+    )
     print(f"Executing subcommand: {args.subcommand}")
+    print(f"Resolved data_root: {cfg.data_root}")
+    print(f"Resolved runs_dir: {cfg.runs_dir}")
 
 
 if __name__ == "__main__":

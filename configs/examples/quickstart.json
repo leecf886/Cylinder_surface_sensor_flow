@@ -1,0 +1,21 @@
+{
+  "_comment": "Minimal example configuration for quickstart, smoke tests, and lightweight evaluation",
+  "data_root": "./examples/data",
+  "processed_dir": "./examples/data",
+  "runs_dir": "./runs/quickstart",
+  "checkpoints": {
+    "mlp": "./examples/checkpoints/mlp",
+    "deepsets": "./examples/checkpoints/deepsets",
+    "pinn": "./examples/checkpoints/ppinn",
+    "pod": "./examples/checkpoints/pod"
+  },
+  "dataset": {
+    "mesh_file": "mesh.h5"
+  },
+  "fold": "default",
+  "physics": {
+    "cylinder_diameter": 0.01,
+    "fluid_density": 1000.0,
+    "pressure_scale_mode": "rho_uinf2"
+  }
+}
