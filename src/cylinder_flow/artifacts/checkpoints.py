@@ -13,6 +13,7 @@ import torch
 
 from cylinder_flow.data.normalization import Normalizer
 from cylinder_flow.models.mlp import SensorMLP
+from cylinder_flow.models.ppinn import PPINNModel
 
 
 @contextlib.contextmanager
@@ -185,3 +186,140 @@ def load_legacy_mlp_checkpoint(
         checkpoint_path=path,
         raw_dict=ckpt,
     )
+
+
+@dataclass
+class LegacyPPINNPackage:
+    """Container for loaded legacy pPINN checkpoint, model, physical parameters, and config.
+
+    Attributes:
+        model: Evaluated PPINNModel instance with loaded weights.
+        D: Characteristic cylinder diameter in meters (e.g. 0.01).
+        rho: Fluid density in kg/m^3 (e.g. 1000.0).
+        u_inf: Free-stream velocity U_inf in m/s (default 1.0).
+        pressure_scale_mode: Pressure scaling mode identifier (default 'rho_uinf2').
+        re_norm_method: Normalization method for Re ('minmax' or 'standard').
+        re_mean: Center value used for Re normalization.
+        re_scale: Scale divisor used for Re normalization.
+        hidden_dims: Hidden layer dimensions (e.g. [128, 128, 128, 128, 128, 128]).
+        epoch: Training epoch at which checkpoint was saved.
+        checkpoint_path: Path from which checkpoint was loaded.
+        config_path: Path from which accompanying config.json was loaded, if any.
+        raw_dict: Complete raw dictionary from checkpoint file.
+        config_dict: Complete dictionary loaded from accompanying config.json, if any.
+    """
+
+    model: PPINNModel
+    D: float = 0.01
+    rho: float = 1000.0
+    u_inf: float = 1.0
+    pressure_scale_mode: str = "rho_uinf2"
+    re_norm_method: str = "minmax"
+    re_mean: float = 200.0
+    re_scale: float = 800.0
+    hidden_dims: list[int] = field(default_factory=lambda: [128, 128, 128, 128, 128, 128])
+    epoch: Optional[int] = None
+    checkpoint_path: Optional[Path] = None
+    config_path: Optional[Path] = None
+    raw_dict: dict = field(default_factory=dict)
+    config_dict: dict = field(default_factory=dict)
+
+
+def load_legacy_ppinn_checkpoint(
+    ckpt_path: Union[str, Path],
+    config_path: Optional[Union[str, Path]] = None,
+    map_location: Union[str, torch.device] = "cpu",
+) -> LegacyPPINNPackage:
+    """Load a legacy parametric PINN (pPINN) checkpoint and its configuration.
+
+    Parameters:
+        ckpt_path: Path to best_ppinn.pt checkpoint file.
+        config_path: Optional explicit path to config.json. If None, looks for
+            config.json in the same folder as ckpt_path.
+        map_location: Device to load model tensors onto.
+
+    Returns:
+        LegacyPPINNPackage containing PPINNModel in eval mode and physical settings.
+
+    Raises:
+        FileNotFoundError: If checkpoint file does not exist.
+        ValueError: If checkpoint format is invalid or missing required keys.
+    """
+    path = Path(ckpt_path)
+    ckpt = safe_torch_load(path, map_location=map_location, weights_only=False)
+
+    if not isinstance(ckpt, dict) or "model_state_dict" not in ckpt:
+        raise ValueError(f"Invalid pPINN checkpoint format in {path}: missing 'model_state_dict'")
+
+    hidden_dims = [int(d) for d in ckpt.get("hidden_dims", [128, 128, 128, 128, 128, 128])]
+    d_val = float(ckpt.get("D", 0.01))
+    if d_val <= 0.0:
+        raise ValueError(f"Invalid cylinder diameter D ({d_val}) in pPINN checkpoint {path}")
+
+    re_norm_method = str(ckpt.get("re_norm_method", "minmax"))
+    if "re_mean" in ckpt:
+        re_mean = float(ckpt["re_mean"])
+    elif "re_center" in ckpt:
+        re_mean = float(ckpt["re_center"])
+        warnings.warn("Checkpoint uses legacy 're_center' key; please re-save with 're_mean'.", stacklevel=2)
+    else:
+        re_mean = 200.0
+
+    re_scale = float(ckpt.get("re_scale", 800.0))
+
+    # Resolve accompanying config.json
+    resolved_config_path: Optional[Path] = None
+    config_dict: dict = {}
+    if config_path is not None:
+        cfg_p = Path(config_path)
+        if cfg_p.is_file():
+            resolved_config_path = cfg_p
+    else:
+        sibling_cfg = path.parent / "config.json"
+        if sibling_cfg.is_file():
+            resolved_config_path = sibling_cfg
+
+    if resolved_config_path is not None:
+        try:
+            import json
+
+            with open(resolved_config_path, "r", encoding="utf-8") as f:
+                config_dict = json.load(f)
+        except Exception as exc:
+            warnings.warn(f"Failed to load config file at {resolved_config_path}: {exc}", stacklevel=2)
+
+    # Physical parameters from config (with defaults)
+    rho = float(config_dict.get("rho", 1000.0))
+    u_inf = float(config_dict.get("U_inf", 1.0))
+    pressure_scale_mode = str(config_dict.get("pressure_scale_mode", "rho_uinf2"))
+
+    # Instantiate model
+    model = PPINNModel(
+        hidden_dims=hidden_dims,
+        D=d_val,
+        re_norm_method=re_norm_method,
+        re_mean=re_mean,
+        re_scale=re_scale,
+        activation=str(config_dict.get("activation", "tanh")),
+    )
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.to(map_location)
+    model.eval()
+
+    return LegacyPPINNPackage(
+        model=model,
+        D=d_val,
+        rho=rho,
+        u_inf=u_inf,
+        pressure_scale_mode=pressure_scale_mode,
+        re_norm_method=re_norm_method,
+        re_mean=re_mean,
+        re_scale=re_scale,
+        hidden_dims=hidden_dims,
+        epoch=ckpt.get("epoch"),
+        checkpoint_path=path,
+        config_path=resolved_config_path,
+        raw_dict=ckpt,
+        config_dict=config_dict,
+    )
+

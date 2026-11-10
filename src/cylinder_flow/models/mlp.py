@@ -5,12 +5,10 @@ from typing import List, Sequence, Union
 import torch
 import torch.nn as nn
 
-_ACTIVATION_MAP = {
-    "relu": nn.ReLU,
-    "tanh": nn.Tanh, #PINN用，不做mlp测试
-    "gelu": nn.GELU, #效果太差了
-    "identity": nn.Identity,
-}
+from cylinder_flow.models.activations import ACTIVATION_MAP, get_activation
+
+# Backward-compatible internal alias
+_ACTIVATION_MAP = ACTIVATION_MAP
 
 
 class SensorMLP(nn.Module):
@@ -60,7 +58,7 @@ class SensorMLP(nn.Module):
         layers: List[nn.Module] = []
         for i in range(len(dims) - 1):
             layers.append(nn.Linear(dims[i], dims[i + 1]))
-            layers.append(_ACTIVATION_MAP[act_key]())
+            layers.append(get_activation(act_key))
         layers.append(nn.Linear(dims[-1], self.output_dim))
         self.net = nn.Sequential(*layers)
 

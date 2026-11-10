@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
 import numpy as np
 
+from cylinder_flow.physics.scaling import scale_field_to_nondimensional
+
 
 @dataclass
 class MeshData:
@@ -212,26 +214,22 @@ class ReCaseData:
     ) -> Optional[np.ndarray]:
         """Convert physical field_uvp (m/s, Pa) to non-dimensional uvp_star for pPINN.
 
-        Scaling convention:
-            u* = u / U_inf
-            v* = v / U_inf
-            p* = p / (rho * U_inf^2) (for mode 'rho_uinf2')
+        Delegates to cylinder_flow.physics.scaling.scale_field_to_nondimensional.
 
         Args:
             rho: Fluid density in kg/m^3 (default 1000.0).
-            mode: Pressure scaling mode ('rho_uinf2').
+            mode: Pressure scaling mode ('rho_uinf2', 'uinf2', or 'none').
 
         Returns:
-            np.ndarray: Non-dimensionalized field [Nt, Nroi, 3], or None if field_uvp is None.
+            np.ndarray: Non-dimensionalized field [Nt, Nroi, 3] as float32,
+            or None if field_uvp is None.
         """
         if self.field_uvp is None:
             return None
 
-        if mode != "rho_uinf2":
-            raise ValueError(f"Unsupported pressure scaling mode: {mode}")
-
-        uvp_star = np.empty_like(self.field_uvp, dtype=np.float32)
-        uvp_star[..., 0] = self.field_uvp[..., 0] / self.u_inf
-        uvp_star[..., 1] = self.field_uvp[..., 1] / self.u_inf
-        uvp_star[..., 2] = self.field_uvp[..., 2] / (rho * (self.u_inf**2))
-        return uvp_star
+        return scale_field_to_nondimensional(
+            uvp=self.field_uvp,
+            u_inf=self.u_inf,
+            pressure_scale_mode=mode,
+            rho=rho,
+        ).astype(np.float32)
