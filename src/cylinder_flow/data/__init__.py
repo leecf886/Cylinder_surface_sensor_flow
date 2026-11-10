@@ -1,4 +1,4 @@
-"""Data handling, dataset structures, HDF5 I/O, and split management."""
+"""Data handling, dataset structures, HDF5 I/O, split management, and normalization."""
 from cylinder_flow.data.h5 import (
     discover_available_re_ids,
     load_mesh,
@@ -7,6 +7,10 @@ from cylinder_flow.data.h5 import (
     parse_re_from_filename,
     save_mesh,
     save_re_case,
+)
+from cylinder_flow.data.normalization import (
+    Normalizer,
+    channel_stats_from_flat,
 )
 from cylinder_flow.data.splits import (
     ReSplit,
@@ -30,4 +34,6 @@ __all__ = [
     "save_re_case",
     "discover_available_re_ids",
     "parse_re_from_filename",
+    "Normalizer",
+    "channel_stats_from_flat",
 ]
