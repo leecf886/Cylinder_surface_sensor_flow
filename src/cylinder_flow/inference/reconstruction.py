@@ -5,11 +5,22 @@ from typing import Optional, Sequence, Tuple, Union
 import numpy as np
 import torch
 
-from cylinder_flow.artifacts.checkpoints import LegacyMLPPackage, LegacyPPINNPackage
+from cylinder_flow.artifacts.checkpoints import (
+    DeepSetsPackage,
+    LegacyMLPPackage,
+    LegacyPPINNPackage,
+)
 from cylinder_flow.data.normalization import Normalizer
 from cylinder_flow.data.types import MeshData, ReCaseData
 from cylinder_flow.evaluation.cycles import wrap_phase
 from cylinder_flow.inference.encoder import EncoderPrediction, predict_re_phase_full
+from cylinder_flow.models.deepsets import (
+    DynamicSensorBatch,
+    DynamicTokenRegressor,
+    FixedFlattenedAdapter,
+    SetSensorEncoder,
+    validate_sensor_indices,
+)
 from cylinder_flow.models.mlp import SensorMLP
 from cylinder_flow.models.ppinn import PPINNModel
 from cylinder_flow.physics.scaling import scale_field_to_physical
@@ -158,10 +169,18 @@ def reconstruct_field_oracle(
 
 
 def reconstruct_field_closed_loop(
-    mlp: Union[SensorMLP, LegacyMLPPackage],
+    mlp: Union[
+        SensorMLP,
+        LegacyMLPPackage,
+        DeepSetsPackage,
+        DynamicTokenRegressor,
+        SetSensorEncoder,
+        FixedFlattenedAdapter,
+        torch.nn.Module,
+    ],
     ppinn: Union[PPINNModel, LegacyPPINNPackage],
     mesh_xy: np.ndarray,
-    sensor_inputs: Union[np.ndarray, torch.Tensor],
+    sensor_inputs: Union[np.ndarray, torch.Tensor, DynamicSensorBatch],
     x_normalizer: Optional[Normalizer] = None,
     re_normalizer: Optional[Normalizer] = None,
     output_scale: str = "nondimensional",
@@ -170,48 +189,41 @@ def reconstruct_field_closed_loop(
     pressure_scale_mode: Optional[str] = None,
     chunk_size: int = 16384,
     device: Union[str, torch.device] = "cpu",
+    positions: Optional[Union[Sequence[Sequence[float]], np.ndarray, torch.Tensor]] = None,
 ) -> Tuple[np.ndarray, EncoderPrediction]:
     """Reconstruct flow field in closed-loop mode (sensors -> encoder -> pPINN).
 
+    Supports both fixed-layout encoders (SensorMLP, SetSensorEncoder) and dynamic
+    encoders (DeepSetsPackage, DynamicSetSensorEncoder) with flat or token inputs.
+
     Parameters:
-        mlp: Either a SensorMLP instance or loaded LegacyMLPPackage.
+        mlp: Trained encoder instance or loaded package (MLP or DeepSets).
         ppinn: Either a PPINNModel instance or loaded LegacyPPINNPackage.
         mesh_xy: ROI mesh physical coordinates [Nroi, 2].
-        sensor_inputs: Raw unnormalized sensor observations [Nt, 3*K] or [3*K].
-        x_normalizer: Fitted sensor feature normalizer (if mlp is SensorMLP).
-        re_normalizer: Fitted Reynolds number normalizer (if mlp is SensorMLP).
+        sensor_inputs: Raw sensor observations or DynamicSensorBatch.
+        x_normalizer: Fitted sensor feature normalizer (if mlp is bare SensorMLP).
+        re_normalizer: Fitted Reynolds number normalizer (if mlp is bare model).
         output_scale: Output scale: 'nondimensional' or 'physical'.
         u_inf: Optional free-stream velocity.
         rho: Optional fluid density.
         pressure_scale_mode: Pressure scaling mode identifier.
         chunk_size: Spatial chunk size for pPINN forward evaluation.
         device: PyTorch device ('cpu', 'cuda').
+        positions: Optional sensor coordinates if passing flat inputs to dynamic model.
 
     Returns:
         Tuple of:
             - field_pred: Reconstructed flow field [Nt, Nroi, 3] or [Nroi, 3].
             - encoder_pred: EncoderPrediction containing (re, phase, phase_sin, phase_cos).
     """
-    if isinstance(mlp, LegacyMLPPackage):
-        mlp_model = mlp.model
-        x_norm = mlp.x_normalizer
-        re_norm = mlp.re_normalizer
-    elif isinstance(mlp, SensorMLP):
-        mlp_model = mlp
-        if x_normalizer is None or re_normalizer is None:
-            raise ValueError("x_normalizer and re_normalizer are required when passing bare SensorMLP")
-        x_norm = x_normalizer
-        re_norm = re_normalizer
-    else:
-        raise TypeError(f"mlp must be SensorMLP or LegacyMLPPackage, got {type(mlp)}")
-
     # 1. Predict Re and Phase from sensor signals
     encoder_pred = predict_re_phase_full(
-        model=mlp_model,
+        model=mlp,
         sensor_inputs=sensor_inputs,
-        x_normalizer=x_norm,
-        re_normalizer=re_norm,
+        x_normalizer=x_normalizer,
+        re_normalizer=re_normalizer,
         device=device,
+        positions=positions,
     )
 
     # 2. Reconstruct flow field with pPINN using predicted Re and Phase
@@ -276,7 +288,7 @@ def reconstruct_case_oracle(
 
 
 def reconstruct_case_closed_loop(
-    mlp_package: LegacyMLPPackage,
+    mlp_package: Union[LegacyMLPPackage, DeepSetsPackage],
     ppinn_package: LegacyPPINNPackage,
     case: ReCaseData,
     mesh: MeshData,
@@ -284,11 +296,15 @@ def reconstruct_case_closed_loop(
     output_scale: str = "nondimensional",
     chunk_size: int = 16384,
     device: Union[str, torch.device] = "cpu",
+    *,
+    sensor_indices: Optional[Sequence[int]] = None,
 ) -> Tuple[np.ndarray, EncoderPrediction]:
     """Convenience closed-loop reconstruction wrapper for ReCaseData and MeshData structures.
 
+    Supports both LegacyMLPPackage (fixed layout) and DeepSetsPackage (dynamic set).
+
     Parameters:
-        mlp_package: Loaded LegacyMLPPackage.
+        mlp_package: Loaded LegacyMLPPackage or DeepSetsPackage.
         ppinn_package: Loaded LegacyPPINNPackage.
         case: ReCaseData instance.
         mesh: MeshData containing ROI mesh coordinates.
@@ -296,19 +312,57 @@ def reconstruct_case_closed_loop(
         output_scale: 'nondimensional' or 'physical'.
         chunk_size: Spatial chunk size.
         device: PyTorch device.
+        sensor_indices: Optional subset of sensor indices. Keyword-only.
 
     Returns:
         Tuple of (field_pred, encoder_pred).
     """
-    sensor_input_flat = case.get_sensors(mlp_package.sensor_indices, flatten=True)
-    if time_indices is not None:
-        sensor_input_flat = sensor_input_flat[time_indices]
+    if isinstance(mlp_package, LegacyMLPPackage):
+        if sensor_indices is not None:
+            val_idx = validate_sensor_indices(sensor_indices, candidate_count=case.ncand)
+            if list(val_idx) != list(mlp_package.sensor_indices):
+                raise ValueError(
+                    f"Legacy MLP fixed layout does not support changing sensor layout or order. "
+                    f"Expected {mlp_package.sensor_indices}, got {list(val_idx)}"
+                )
+            idx = val_idx
+        else:
+            idx = mlp_package.sensor_indices
+
+        sensor_inputs = case.get_sensors(idx, flatten=True)
+        if time_indices is not None:
+            sensor_inputs = sensor_inputs[time_indices]
+
+    elif isinstance(mlp_package, DeepSetsPackage):
+        if case.ncand != mlp_package.candidate_count:
+            raise ValueError(
+                f"Case candidate count ({case.ncand}) does not match package pool count "
+                f"({mlp_package.candidate_count})"
+            )
+        raw_idx = mlp_package.default_sensor_indices if sensor_indices is None else sensor_indices
+        idx = validate_sensor_indices(raw_idx, candidate_count=mlp_package.candidate_count)
+
+        values = case.get_sensors(idx, flatten=False)  # [Nt, K, 3]
+        if time_indices is not None:
+            values = values[time_indices]
+        nt = values.shape[0]
+        k = len(idx)
+        pos = mlp_package.candidate_positions[idx]
+        pos_batch = np.broadcast_to(pos[None, :, :], (nt, k, 2)).astype(np.float32).copy()
+        mask = np.ones((nt, k), dtype=bool)
+        count = np.full((nt, 1), float(k), dtype=np.float32)
+        sensor_inputs = DynamicSensorBatch(values=values.astype(np.float32), pos=pos_batch, mask=mask, count=count)
+
+    else:
+        raise TypeError(
+            f"mlp_package must be LegacyMLPPackage or DeepSetsPackage, got {type(mlp_package)}"
+        )
 
     return reconstruct_field_closed_loop(
         mlp=mlp_package,
         ppinn=ppinn_package,
         mesh_xy=mesh.roi_xy,
-        sensor_inputs=sensor_input_flat,
+        sensor_inputs=sensor_inputs,
         output_scale=output_scale,
         u_inf=case.u_inf,
         rho=ppinn_package.rho,

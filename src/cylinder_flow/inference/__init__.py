@@ -1,5 +1,6 @@
 """Inference modules for encoders and full-field reconstruction."""
 from cylinder_flow.inference.encoder import (
+    DynamicSensorBatch,
     EncoderPrediction,
     predict_re_case,
     predict_re_phase,
@@ -14,6 +15,7 @@ from cylinder_flow.inference.reconstruction import (
 )
 
 __all__ = [
+    "DynamicSensorBatch",
     "EncoderPrediction",
     "predict_re_case",
     "predict_re_phase",

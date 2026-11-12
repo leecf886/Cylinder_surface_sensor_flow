@@ -36,6 +36,7 @@ class SensorMLP(nn.Module):
         hidden_dims: Sequence[int] = (128, 128, 128),
         output_dim: int = 3,
         activation: str = "relu",
+        seed: Optional[int] = None,
     ) -> None:
         super().__init__()
         if input_dim <= 0:
@@ -61,6 +62,26 @@ class SensorMLP(nn.Module):
             layers.append(get_activation(act_key))
         layers.append(nn.Linear(dims[-1], self.output_dim))
         self.net = nn.Sequential(*layers)
+
+        if seed is not None:
+            self.reset_parameters(seed=seed)
+
+    @property
+    def activation(self) -> str:
+        """Name of the activation function used (alias for activation_name)."""
+        return self.activation_name
+
+    def reset_parameters(self, seed: Optional[int] = None) -> None:
+        """Reset all trainable parameters with optional deterministic seed control.
+
+        Parameters:
+            seed: Optional integer seed for deterministic weight re-initialization.
+        """
+        if seed is not None:
+            torch.manual_seed(int(seed))
+        for layer in self.net:
+            if hasattr(layer, "reset_parameters"):
+                layer.reset_parameters()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass.

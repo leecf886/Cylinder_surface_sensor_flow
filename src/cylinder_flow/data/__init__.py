@@ -12,6 +12,17 @@ from cylinder_flow.data.normalization import (
     Normalizer,
     channel_stats_from_flat,
 )
+from cylinder_flow.data.sampling import (
+    BalancedRandomSubsetSampler,
+    DynamicBatchCollator,
+    DynamicCircularCylinderDataset,
+    DynamicSensorDataset,
+    SensorDataset,
+    create_dynamic_sensor_data_loader,
+    create_sensor_data_loader,
+    load_holdout_layouts,
+    reset_dynamic_loader,
+)
 from cylinder_flow.data.splits import (
     ReSplit,
     check_re_split_disjoint,
@@ -36,4 +47,13 @@ __all__ = [
     "parse_re_from_filename",
     "Normalizer",
     "channel_stats_from_flat",
+    "SensorDataset",
+    "DynamicSensorDataset",
+    "DynamicCircularCylinderDataset",
+    "BalancedRandomSubsetSampler",
+    "DynamicBatchCollator",
+    "create_sensor_data_loader",
+    "create_dynamic_sensor_data_loader",
+    "reset_dynamic_loader",
+    "load_holdout_layouts",
 ]
