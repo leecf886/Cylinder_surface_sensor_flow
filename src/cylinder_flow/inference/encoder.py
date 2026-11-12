@@ -7,7 +7,11 @@ from typing import TYPE_CHECKING, Optional, Sequence, Tuple, Union
 import numpy as np
 import torch
 
-from cylinder_flow.artifacts.checkpoints import DeepSetsPackage, LegacyMLPPackage
+from cylinder_flow.artifacts.checkpoints import (
+    AblationPackage,
+    DeepSetsPackage,
+    LegacyMLPPackage,
+)
 from cylinder_flow.data.normalization import Normalizer
 from cylinder_flow.evaluation.cycles import wrap_phase
 from cylinder_flow.models.deepsets import (
@@ -68,6 +72,7 @@ def predict_re_phase(
         SetSensorEncoder,
         FixedFlattenedAdapter,
         DeepSetsPackage,
+        AblationPackage,
         LegacyMLPPackage,
         torch.nn.Module,
     ],
@@ -116,6 +121,7 @@ def predict_re_phase_full(
         SetSensorEncoder,
         FixedFlattenedAdapter,
         DeepSetsPackage,
+        AblationPackage,
         LegacyMLPPackage,
         torch.nn.Module,
     ],
@@ -129,7 +135,7 @@ def predict_re_phase_full(
     """Full sensor inference returning Re, Phase, sin(phase), and cos(phase).
 
     Parameters:
-        model: Trained encoder (SensorMLP, DeepSets, or package container).
+        model: Trained encoder (SensorMLP, DeepSets, AblationPackage, or package container).
         sensor_inputs: Raw sensor array of shape [Nt, 3*K] / [3*K] or DynamicSensorBatch.
         x_normalizer: Optional fitted Normalizer for sensor features (for MLP).
         re_normalizer: Optional fitted Normalizer for Reynolds number.
@@ -164,6 +170,18 @@ def predict_re_phase_full(
             default_positions = model.candidate_positions[model.default_sensor_indices]
         elif default_positions is not None:
             verify_positions_in_candidate_pool(default_positions, model.candidate_positions)
+    elif isinstance(model, AblationPackage):
+        model_obj = model.model
+        if x_normalizer is not None and not _normalizers_equal(x_normalizer, model.x_normalizer):
+            raise ValueError("Explicit x_normalizer conflicts with AblationPackage x_normalizer")
+        if re_normalizer is not None and not _normalizers_equal(re_normalizer, model.re_normalizer):
+            raise ValueError("Explicit re_normalizer conflicts with AblationPackage re_normalizer")
+        x_norm = model.x_normalizer
+        re_norm = model.re_normalizer
+        if default_positions is None and model.default_sensor_indices:
+            default_positions = model.candidate_positions[model.default_sensor_indices]
+        elif default_positions is not None:
+            verify_positions_in_candidate_pool(default_positions, model.candidate_positions)
     elif isinstance(model, torch.nn.Module):
         model_obj = model
         x_norm = x_normalizer
@@ -189,7 +207,7 @@ def predict_re_phase_full(
                 f"DynamicSensorBatch input requires dynamic token encoder, got {type(model_obj)}"
             )
 
-        if isinstance(model, DeepSetsPackage):
+        if isinstance(model, (DeepSetsPackage, AblationPackage)):
             # Verify valid unmasked token positions correspond to package candidate pool (masked padding ignored)
             m_arr = (
                 sensor_inputs.mask.detach().cpu().numpy()
@@ -366,7 +384,7 @@ def predict_re_phase_full(
 
 
 def predict_re_case(
-    package: Union[LegacyMLPPackage, DeepSetsPackage],
+    package: Union[LegacyMLPPackage, DeepSetsPackage, AblationPackage],
     case: ReCaseData,
     device: Union[str, torch.device] = "cpu",
     batch_size: Optional[int] = None,
@@ -376,7 +394,7 @@ def predict_re_case(
     """Convenience helper: extract sensors from ReCaseData and predict (Re, phase).
 
     Parameters:
-        package: Loaded LegacyMLPPackage or DeepSetsPackage.
+        package: Loaded LegacyMLPPackage, DeepSetsPackage, or AblationPackage.
         case: ReCaseData instance.
         device: PyTorch device ('cpu', 'cuda').
         batch_size: Optional chunked batch size.
@@ -405,7 +423,7 @@ def predict_re_case(
             batch_size=batch_size,
         )  # type: ignore[return-value]
 
-    if isinstance(package, DeepSetsPackage):
+    if isinstance(package, (DeepSetsPackage, AblationPackage)):
         if case.ncand != package.candidate_count:
             raise ValueError(
                 f"Case candidate count ({case.ncand}) does not match package pool count "
@@ -429,4 +447,6 @@ def predict_re_case(
             batch_size=batch_size,
         )  # type: ignore[return-value]
 
-    raise TypeError(f"package must be LegacyMLPPackage or DeepSetsPackage, got {type(package)}")
+    raise TypeError(
+        f"package must be LegacyMLPPackage, DeepSetsPackage, or AblationPackage, got {type(package)}"
+    )

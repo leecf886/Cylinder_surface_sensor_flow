@@ -144,8 +144,66 @@ best_model, history = train_sensor_deepsets(
 )
 ```
 
+### 3. Training Parametric PINN (pPINN)
+Physics-informed collaborative training fitting supervised flow field data while enforcing the non-dimensional 2D incompressible Navier-Stokes momentum and continuity equations:
+
+```python
+from cylinder_flow.training import PPINNTrainingConfig, train_ppinn
+
+config = PPINNTrainingConfig(
+    train_re=[200, 225, 275, 300, 350, 400, 500, 550, 600, 700, 750, 850, 900, 1000],
+    val_re=[450, 800],
+    test_re=[250, 650],
+    batch_size=2048,
+    n_collocation=4096,
+    num_epochs=200,
+    learning_rate=1e-3,
+    lambda_data=1.0,
+    lambda_phys=1.0,
+    pressure_scale_mode="rho_uinf2",
+    checkpoint_selection_metric="data_mse",
+    seed=42,
+)
+
+best_model, history = train_ppinn(
+    train_cases=train_cases,
+    val_cases=val_cases,
+    mesh=mesh,
+    config=config,
+    output_dir="runs/ppinn_default",
+)
+```
+
+### 4. Architecture Ablation Encoders & Baselines (Phase 8d)
+The pipeline supports 8 immutable architecture ablation variants under independent checkpoint schema `dynamic_arch_ablation_schema_v1` (7 neural variants + 1 closed-form Fourier-K2 Ridge baseline `arch_fourier_k2_ridge`):
+
+```python
+from cylinder_flow.artifacts import load_ablation_checkpoint, save_ablation_checkpoint
+from cylinder_flow.inference import predict_re_phase_full, reconstruct_field_closed_loop
+
+# 1. Load trained ablation package with verified contract & physical provenance
+package = load_ablation_checkpoint("path/to/ablation_checkpoint.pt")
+print(f"Variant: {package.arch_variant}, Schema: {package.schema_name}")
+
+# 2. Direct sensor inference (supports DynamicSensorBatch or flattened arrays)
+prediction = predict_re_phase_full(model=package, sensor_inputs=sensor_inputs)
+print(f"Predicted Re: {prediction.re}, Phase: {prediction.phase}")
+
+# 3. Fixed flattened layout adapter
+adapter = package.as_fixed_adapter()  # takes [B, 3*K] flattened sensor observations
+
+# 4. Closed-loop flow field reconstruction with pPINN
+field_pred, enc_pred = reconstruct_field_closed_loop(
+    mlp=package,
+    ppinn=ppinn_package,
+    mesh_xy=mesh.roi_xy,
+    sensor_inputs=sensor_inputs,
+)
+```
+
 > [!NOTE]
 > **Activation & Schema Compatibility**:
 > - **Inference on Bundled Checkpoint**: The bundled legacy asset (`examples/checkpoints/deepsets/best_model.pt`) was trained with GELU activations under **Schema v1**. `load_deepsets_checkpoint` automatically detects and verifies schema 1 contracts without weight reinterpretation.
 > - **New Model Training**: Current baseline and newly trained models use native ReLU activations under **Schema v2** (`activation='relu'`). Checkpoint serialization enforces schema 2 contracts and verifies internal ReLU activations.
+> - **Architecture Ablation Checkpoints**: Use independent schema `dynamic_arch_ablation_schema_v1` loaded via `load_ablation_checkpoint` / `save_ablation_checkpoint` returning an `AblationPackage`.
 

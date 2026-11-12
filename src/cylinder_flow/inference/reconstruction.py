@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from cylinder_flow.artifacts.checkpoints import (
+    AblationPackage,
     DeepSetsPackage,
     LegacyMLPPackage,
     LegacyPPINNPackage,
@@ -173,6 +174,7 @@ def reconstruct_field_closed_loop(
         SensorMLP,
         LegacyMLPPackage,
         DeepSetsPackage,
+        AblationPackage,
         DynamicTokenRegressor,
         SetSensorEncoder,
         FixedFlattenedAdapter,
@@ -288,7 +290,7 @@ def reconstruct_case_oracle(
 
 
 def reconstruct_case_closed_loop(
-    mlp_package: Union[LegacyMLPPackage, DeepSetsPackage],
+    mlp_package: Union[LegacyMLPPackage, DeepSetsPackage, AblationPackage],
     ppinn_package: LegacyPPINNPackage,
     case: ReCaseData,
     mesh: MeshData,
@@ -301,10 +303,10 @@ def reconstruct_case_closed_loop(
 ) -> Tuple[np.ndarray, EncoderPrediction]:
     """Convenience closed-loop reconstruction wrapper for ReCaseData and MeshData structures.
 
-    Supports both LegacyMLPPackage (fixed layout) and DeepSetsPackage (dynamic set).
+    Supports LegacyMLPPackage (fixed layout), DeepSetsPackage, and AblationPackage (dynamic set).
 
     Parameters:
-        mlp_package: Loaded LegacyMLPPackage or DeepSetsPackage.
+        mlp_package: Loaded LegacyMLPPackage, DeepSetsPackage, or AblationPackage.
         ppinn_package: Loaded LegacyPPINNPackage.
         case: ReCaseData instance.
         mesh: MeshData containing ROI mesh coordinates.
@@ -333,7 +335,7 @@ def reconstruct_case_closed_loop(
         if time_indices is not None:
             sensor_inputs = sensor_inputs[time_indices]
 
-    elif isinstance(mlp_package, DeepSetsPackage):
+    elif isinstance(mlp_package, (DeepSetsPackage, AblationPackage)):
         if case.ncand != mlp_package.candidate_count:
             raise ValueError(
                 f"Case candidate count ({case.ncand}) does not match package pool count "
@@ -355,7 +357,7 @@ def reconstruct_case_closed_loop(
 
     else:
         raise TypeError(
-            f"mlp_package must be LegacyMLPPackage or DeepSetsPackage, got {type(mlp_package)}"
+            f"mlp_package must be LegacyMLPPackage, DeepSetsPackage, or AblationPackage, got {type(mlp_package)}"
         )
 
     return reconstruct_field_closed_loop(
