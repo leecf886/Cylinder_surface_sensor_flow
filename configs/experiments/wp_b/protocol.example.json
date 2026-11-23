@@ -1,0 +1,64 @@
+{
+  "_comment": "Sanitized WP-B dynamic encoder example protocol (relative paths only, not for formal claims).",
+  "schema_version": "wp_b_protocol_v1",
+  "protocol_id": "wp_b_example_protocol_v1",
+  "approval_status": "pending",
+  "example_not_formal": true,
+  "mode": "dynamic",
+  "data_root": "./data",
+  "processed_dir": "./data/processed_data_base_60",
+  "runs_dir": "./runs/wp_b",
+  "fold": "default",
+  "data_boundary": {
+    "default_processed_data": "./data/processed_data_base_60",
+    "allowed_processed_data_variants": ["processed_data_base_60"],
+    "candidate_count": 60,
+    "candidate_pool_source": "dense_surface_theta_60"
+  },
+  "paths": {
+    "output_root": "./runs/wp_b",
+    "layout_manifest_path": "./configs/experiments/wp_b/layout_holdout.example.json",
+    "ppinn_checkpoint": "./runs/wp_a/ppinn_selection/best_ppinn.pt"
+  },
+  "re_split": {
+    "re_fold_id": "default",
+    "train_re": [200, 225, 275, 300, 350, 400, 500, 550, 600, 700, 750, 850, 900, 1000],
+    "val_re": [450, 800],
+    "test_re": [250, 650],
+    "strict_re_split": true,
+    "test_reuse_positioning": "descriptive_secondary_analysis"
+  },
+  "unseen_combination_protocol": {
+    "training_budgets": [6, 12, 24, 48],
+    "holdout_layout_manifest": "./configs/experiments/wp_b/layout_holdout.example.json",
+    "training_sampler_exclusion": "mechanical_exclusion_of_holdout_layouts"
+  },
+  "unseen_sensor_count_protocol": {
+    "training_counts": [6, 12, 24, 48],
+    "holdout_counts": [10, 18, 36],
+    "selection_panel_counts": [6, 12, 24, 48]
+  },
+  "dynamic_variants": [
+    "main",
+    "pool_mean",
+    "pool_max",
+    "pool_sum",
+    "pos_none",
+    "count_none",
+    "dropout_light",
+    "dropout_moderate"
+  ],
+  "seeds": {
+    "base_seed": 42,
+    "model_repeat_ids": [0, 1, 2, 3, 4]
+  },
+  "training": {
+    "num_epochs": 200,
+    "batch_size": 512,
+    "training_sensor_counts": [6, 12, 24, 48]
+  },
+  "statistical_protocol": {
+    "n_bootstrap": 5000,
+    "bootstrap_seed": 20260725
+  }
+}

@@ -46,6 +46,9 @@ ENV/
 !/examples/checkpoints/ppinn/best_ppinn.pt
 !/examples/checkpoints/pod/pod_model.npz
 !/examples/data/mesh.h5
+!/examples/results/wp_a_sample_metrics_long.csv
+!/examples/results/wp_a_sample_layouts.json
+!/examples/results/wp_d_sample_results_long.csv
 
 # Local machine path configuration (override from paths.example.json)
 configs/paths.json

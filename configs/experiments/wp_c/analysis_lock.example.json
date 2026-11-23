@@ -1,0 +1,64 @@
+{
+  "schema_version": "wp_c_analysis_lock_record_v1",
+  "lock_id": "wp_c_analysis_lock_example_pending_v0",
+  "approval_status": "pending",
+  "example_not_formal": true,
+  "claim_classification": "descriptive_secondary_analysis_after_prior_test_reuse",
+  "confirmatory_claims_allowed": false,
+  "prior_test_reuse": true,
+  "prior_test_reuse_declaration": "Re=250/650 were already opened in WP-A and WP-B; WP-C reuse is descriptive secondary analysis after prior test reuse only. This EXAMPLE lock is not approved and must not authorize formal reused-test evaluation.",
+  "not_a_new_blind_test_lock": true,
+  "description": "EXAMPLE ONLY. Draft WP-C analysis lock record. Freezes protocol/comparisons/manifest/noise-scale hashes, claim classification, expected matrix identity, and code identity placeholders. Owner must recompute hashes, fill git identity, and set approval_status=approved before formal reused-test evaluation. Code must never auto-approve this record.",
+  "frozen_artifacts": {
+    "protocol_path": "./configs/experiments/wp_c/protocol.example.json",
+    "protocol_sha256": "<PLACEHOLDER: sha256 of approved protocol>",
+    "comparisons_path": "./configs/experiments/wp_c/comparisons.example.json",
+    "comparisons_sha256": "<PLACEHOLDER: sha256 of approved comparisons>",
+    "artifact_manifest_path": "./runs/wp_c/wp_c_artifact_manifest.json",
+    "artifact_manifest_sha256": "<PLACEHOLDER: sha256 of approved artifact manifest>",
+    "noise_scale_path": "./runs/wp_c/01_noise_scale/wp_c_noise_scale.json",
+    "noise_scale_sha256": "<PLACEHOLDER: sha256 of approved noise-scale artifact>",
+    "selected_ppinn_path": "./runs/wp_a/ppinn_selection/best_ppinn.pt",
+    "selected_ppinn_sha256": "<PLACEHOLDER: sha256 of frozen WP-A validation-selected pPINN>"
+  },
+  "noise_definition": {
+    "distribution": "synthetic_gaussian_iid_zero_mean",
+    "scale_definition": "rel_std * train_dense_pool_channel_std[c]",
+    "eval_noise_levels": [0.0, 0.01, 0.03, 0.05, 0.10],
+    "eval_noise_seeds": [500000, 500001, 500002, 500003, 500004],
+    "seed_derivation_version": "wp_c_noise_seed_v1",
+    "bit_generator": "numpy.random.Generator(PCG64)",
+    "clean_baseline_evaluated_once": true,
+    "do_not_duplicate_clean_rows_per_noise_seed": true
+  },
+  "expected_matrix": {
+    "driven_by": "approved_artifact_manifest",
+    "split": "test",
+    "re_ids": [250, 650],
+    "noise_levels": [0.0, 0.01, 0.03, 0.05, 0.10],
+    "noise_seeds": [500000, 500001, 500002, 500003, 500004],
+    "n_units": "<PLACEHOLDER: integer unit count from approved manifest>",
+    "expected_cells": "<PLACEHOLDER: n_units * (1 + n_nonzero_levels * n_seeds) * n_re>",
+    "clean_baseline_policy": "once_per_unit_per_re_not_per_noise_seed",
+    "formula_note": "expected_cells = n_units * n_re * (1 + n_nonzero_noise_levels * n_noise_seeds)"
+  },
+  "code_identity": {
+    "git_commit": "<PLACEHOLDER: git rev-parse HEAD>",
+    "git_dirty": "<PLACEHOLDER: true|false>",
+    "git_status_short": "<PLACEHOLDER: git status --short>",
+    "git_status_sha256": "<PLACEHOLDER: sha256 of git status --short bytes>",
+    "note": "Owner freezes code identity at approval time. Formal evaluation must match live HEAD, dirty flag, and status hash. Dirty trees must not be approved for formal reused-test."
+  },
+  "owner_approval": {
+    "status": "pending",
+    "approver": "<PLACEHOLDER: owner name>",
+    "approved_utc": null,
+    "notes": "Do not set approval_status=approved until protocol/comparisons/manifest/noise-scale are frozen non-example artifacts and hashes match."
+  },
+  "forbidden": [
+    "auto_approve_by_code",
+    "new_blind_confirmatory_test_claim",
+    "wilcoxon_holm_confirmatory_inference",
+    "overwrite_wp_a_or_wp_b_formal_directories"
+  ]
+}

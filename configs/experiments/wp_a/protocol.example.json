@@ -1,0 +1,55 @@
+{
+  "_comment": "Sanitized Scheme-A WP-A example protocol configuration (relative paths only, not for formal claims).",
+  "schema_version": "wp-a-scheme-a-protocol-v1",
+  "work_package": "wp_a",
+  "approval_status": "pending",
+  "example_not_formal": true,
+  "data_root": "./data",
+  "processed_dir": "./data/processed_data_base_60",
+  "runs_dir": "./runs/wp_a",
+  "fold": "default",
+  "ppinn_policy": "fixed_default_val_selected",
+  "paths": {
+    "output_root": "./runs/wp_a",
+    "ppinn_selection_dir": "./runs/wp_a/ppinn_selection",
+    "ppinn_checkpoint": "./runs/wp_a/ppinn_selection/best_ppinn.pt",
+    "dynamic_checkpoint": "./runs/wp_b/shared_dynamic/best_model.pt",
+    "pod_checkpoint": "./runs/wp_a/pod/pod_model.npz",
+    "comparisons_path": "./configs/experiments/wp_a/comparisons.example.json"
+  },
+  "ppinn_selection": {
+    "training_action": "none",
+    "selection_metric": "overall_rel_l2_gauge_sameden",
+    "metric_direction": "lower_better",
+    "candidate_checkpoints": [
+      "./runs/pinn_runs/v1/best_ppinn.pt",
+      "./runs/pinn_runs/v2/best_ppinn.pt"
+    ]
+  },
+  "layout_protocol": {
+    "candidate_count": 60,
+    "sensor_counts": [6, 12, 24, 48],
+    "strategies": [
+      "uniform",
+      "physics",
+      "greedy",
+      "qr_pod",
+      "linreg_greedy",
+      "amortized_chain_greedy",
+      "pod_greedy",
+      "random"
+    ],
+    "deterministic_repeats": 5,
+    "random_repeats": 20,
+    "random_train_repeats": 1,
+    "base_seed": 42,
+    "num_epochs": 200,
+    "selection_data_domain": "val_re=[450,800]"
+  },
+  "statistical_protocol": {
+    "paired_unit": "seed",
+    "n_bootstrap": 5000,
+    "confirmatory_tests_enabled": false
+  },
+  "stages": ["preflight"]
+}

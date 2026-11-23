@@ -1,0 +1,87 @@
+{
+  "schema_version": "wp_a_sample_layouts_v1",
+  "candidate_count": 60,
+  "selection_data_domain": "val_re=[450,800]",
+  "layouts": [
+    {
+      "strategy": "uniform",
+      "sensor_count": 12,
+      "sensor_indices": [
+        0,
+        5,
+        10,
+        15,
+        20,
+        25,
+        30,
+        35,
+        40,
+        45,
+        50,
+        55
+      ],
+      "layout_id": "8f4fe0c93e0c900c",
+      "layout_fingerprint": "8f4fe0c93e0c900c293cc70c1bc2ea74f4edf4802fbc2c9838656542c9885ad8"
+    },
+    {
+      "strategy": "physics",
+      "sensor_count": 12,
+      "sensor_indices": [
+        0,
+        7,
+        10,
+        15,
+        20,
+        22,
+        30,
+        38,
+        40,
+        45,
+        50,
+        53
+      ],
+      "layout_id": "75357eaaf9478983",
+      "layout_fingerprint": "75357eaaf9478983fac63f1c5e182d156ce4984cf470e4aba477c2180b2aca85"
+    },
+    {
+      "strategy": "qr_pod",
+      "sensor_count": 12,
+      "sensor_indices": [
+        0,
+        3,
+        7,
+        12,
+        17,
+        23,
+        30,
+        37,
+        43,
+        48,
+        53,
+        57
+      ],
+      "layout_id": "61a0d45685436a4a",
+      "layout_fingerprint": "61a0d45685436a4a8b3654c5ab7dcf8453656e1615d841ba26a3189cb24d2895"
+    },
+    {
+      "strategy": "amortized_chain_greedy",
+      "sensor_count": 12,
+      "sensor_indices": [
+        0,
+        4,
+        8,
+        12,
+        18,
+        24,
+        30,
+        36,
+        42,
+        48,
+        52,
+        56
+      ],
+      "layout_id": "3a4c8bd083bfe9ed",
+      "layout_fingerprint": "3a4c8bd083bfe9ed9c5e587a1c69c0c48828ba0906f833f67b357f6cf4b9cb49"
+    }
+  ]
+}

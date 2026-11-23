@@ -1,0 +1,197 @@
+{
+  "schema_version": "wp_c_protocol_v0",
+  "protocol_id": "wp_c_noise_robustness_readiness_draft_20260729",
+  "approval_status": "pending",
+  "example_not_formal": true,
+  "claim_classification": "descriptive_secondary_analysis_after_prior_test_reuse",
+  "confirmatory_claims_allowed": false,
+  "description": "WP-C formal-experiment readiness protocol (EXAMPLE/DRAFT). Defines clean-trained encoder robustness under synthetic Gaussian eval noise, fixed-MLP vs shared DeepSets pairing, long-table provenance, and formal gates. Not approved; placeholders must be resolved by the owner before formal execution.",
+  "frozen_prior_work_packages": {
+    "wp_a_is_historical_record": true,
+    "wp_b_is_historical_record": true,
+    "wp_a_wp_b_artifacts_read_only": true,
+    "do_not_retrain_or_reselect_ppinn": true,
+    "do_not_research_layouts_on_noisy_test": true,
+    "wp_a_scheme_a_comparisons_path": "./configs/experiments/wp_a/comparisons.example.json",
+    "wp_b_protocol_path": "./configs/experiments/wp_b/protocol.example.json",
+    "wp_b_layout_holdout_path": "./configs/experiments/wp_b/layout_holdout.example.json",
+    "selected_ppinn_path": "./runs/wp_a/ppinn_selection/best_ppinn.pt",
+    "selected_ppinn_sha256": "<PLACEHOLDER: sha256 of frozen WP-A validation-selected pPINN>",
+    "note": "Paths/hashes above cite frozen historical artifacts for reference only. WP-C must not modify those files or directories."
+  },
+  "data_boundary": {
+    "data_root": "./data",
+    "default_processed_data": "./data/processed_data_base_60",
+    "allowed_processed_data_variants": ["processed_data_base_60"],
+    "forbidden_paths": [
+      "./data/cylinder_data",
+      "./data/cylinder_files"
+    ],
+    "candidate_count": 60,
+    "candidate_pool_source": "mesh.h5:/sensors/sensor_theta",
+    "candidate_fingerprint": "<PLACEHOLDER: sha256_float64_round12_ordered of mesh.h5 candidate positions>",
+    "candidate_fingerprint_method": "sha256_float64_round12_ordered",
+    "default_output_root": "./runs/wp_c",
+    "forbid_overwrite_of_wp_a_wp_b_formal_dirs": true
+  },
+  "re_split": {
+    "re_fold_id": "default",
+    "train_re": [200, 225, 275, 300, 350, 400, 500, 550, 600, 700, 750, 850, 900, 1000],
+    "val_re": [450, 800],
+    "test_re": [250, 650],
+    "strict_re_split": true,
+    "test_reuse_positioning": "descriptive_secondary_analysis_after_prior_test_reuse",
+    "test_reuse_note": "Re=250/650 were already opened in WP-A and WP-B. WP-C may reuse them only as pre-registered descriptive/secondary analysis after prior test reuse, never as a new blind confirmatory test."
+  },
+  "noise_protocol": {
+    "distribution": "synthetic_gaussian_iid_zero_mean",
+    "noise_distribution_label": "synthetic Gaussian noise relative to training-channel standard deviation",
+    "not_hardware_validation": true,
+    "channel_order": ["u", "v", "p"],
+    "scale_definition": "rel_std * train_dense_pool_channel_std[c]",
+    "canonical_noise_scale_artifact": "./runs/wp_c/01_noise_scale/wp_c_noise_scale.json",
+    "canonical_noise_scale_artifact_sha256": "<PLACEHOLDER: sha256 after owner computes and freezes noise-scale artifact>",
+    "eval_noise_levels": [0.0, 0.01, 0.03, 0.05, 0.10],
+    "eval_noise_seeds": [500000, 500001, 500002, 500003, 500004],
+    "same_base_z_across_levels": true,
+    "same_base_z_across_layouts_and_model_families": true,
+    "clean_baseline_evaluated_once": true,
+    "do_not_duplicate_clean_rows_per_noise_seed": true,
+    "active_tokens_only": true,
+    "mask_false_tokens_receive_no_noise": true,
+    "seed_derivation_version": "wp_c_noise_seed_v1",
+    "bit_generator": "numpy.random.Generator(PCG64)",
+    "realization_key": [
+      "protocol_identity",
+      "split",
+      "re_id",
+      "stable_snapshot_identity",
+      "global_candidate_index",
+      "channel",
+      "noise_seed"
+    ]
+  },
+  "evaluation_matrix": {
+    "driven_by": "approved_artifact_manifest",
+    "supported_strategies_default": [
+      "uniform",
+      "physics",
+      "greedy",
+      "qr_pod",
+      "linreg_greedy",
+      "amortized_chain_greedy",
+      "random"
+    ],
+    "excluded_strategies": {
+      "pod_greedy": "WP-A pod_greedy is POD-only without MLP checkpoints; excluded from WP-C closed-loop robustness unless an explicitly frozen MLP checkpoint is provided for that layout."
+    },
+    "supported_nsensor_default": [6, 12, 24, 48],
+    "formal_run_executes_only_manifest_units": true,
+    "mandatory_model_families": ["fixed_mlp", "deepsets_dynamic"],
+    "layouts_source": "wp_a_clean_selection_frozen_layouts_only",
+    "random_strategy_keeps_frozen_layout_repeat_distribution": true,
+    "do_not_pick_best_random_on_test": true,
+    "shared_frozen_ppinn_for_all_closed_loop_units": true,
+    "metrics_required": [
+      "re_mae",
+      "re_rmse",
+      "phase_cmae",
+      "phase_crmse",
+      "overall_rel_l2_gauge_sameden",
+      "E_oracle",
+      "E_closed",
+      "delta_e_sensor"
+    ],
+    "delta_e_sensor_definition": "E_closed(noise) - E_oracle; negative values must not be clipped to zero",
+    "per_re_summary": "equal_re_macro_average",
+    "per_cycle_field_metrics": "rebuild_from_raw_sse_ref_accumulators"
+  },
+  "artifact_bindings": {
+    "comparisons_path": "./configs/experiments/wp_c/comparisons.example.json",
+    "comparisons_sha256": "<PLACEHOLDER: sha256 of approved comparisons>",
+    "artifact_manifest_path": "./runs/wp_c/wp_c_artifact_manifest.json",
+    "artifact_manifest_sha256_deferred_to_analysis_lock": true,
+    "artifact_manifest_sha256_note": "Unidirectional binding: protocol records the manifest path/id but does not embed the manifest file SHA. Analysis lock freezes all final byte hashes.",
+    "noise_scale_path": "./runs/wp_c/01_noise_scale/wp_c_noise_scale.json",
+    "noise_scale_sha256": "<PLACEHOLDER: sha256 of approved noise-scale artifact>",
+    "analysis_lock_path": "./configs/experiments/wp_c/analysis_lock.example.json",
+    "analysis_lock_schema": "wp_c_analysis_lock_record_v1"
+  },
+  "optional_modules": {
+    "uq": {
+      "enabled": false,
+      "reason": "T C.3 out of WP-C core acceptance; preflight must reject if enabled=true before implementation exists"
+    },
+    "time_jitter": {
+      "enabled": false,
+      "reason": "T C.4 out of WP-C core acceptance"
+    },
+    "angle_jitter": {
+      "enabled": false,
+      "reason": "T C.4 out of WP-C core acceptance"
+    },
+    "pod_noise": {
+      "enabled": false,
+      "reason": "POD noise chain out of WP-C core acceptance"
+    },
+    "optional_noise_train_prelock": {
+      "enabled": false,
+      "reason": "Default disabled; if later approved, must call existing training entry with --defer-test-evaluation"
+    }
+  },
+  "seeds": {
+    "base_seed": 42,
+    "model_repeat_ids": [0, 1, 2, 3, 4],
+    "eval_noise_seeds": [500000, 500001, 500002, 500003, 500004],
+    "note": "Eval noise seeds are frozen into the pending protocol and must not be changed based on results."
+  },
+  "result_schema_extensions": {
+    "metrics_long_extra_columns": [
+      "model_family",
+      "model_variant",
+      "shared_or_specialized",
+      "model_repeat_id",
+      "checkpoint",
+      "checkpoint_sha256",
+      "train_noise_rel_std",
+      "noise_level",
+      "noise_seed",
+      "noise_realization_id",
+      "noise_fingerprint",
+      "noise_scale_source",
+      "noise_scale_fingerprint",
+      "noise_distribution",
+      "candidate_position_fingerprint",
+      "snapshot_identity_fingerprint",
+      "prior_test_reuse",
+      "oracle_checkpoint_sha256",
+      "pairing_key"
+    ]
+  },
+  "formal_execution_gates": [
+    "approval_status must equal 'approved'",
+    "example_not_formal must be false for formal artifacts",
+    "all '<PLACEHOLDER>' tokens must be resolved",
+    "protocol/comparisons/manifest/noise-scale mutual SHA-256 bindings must match",
+    "claim_classification must remain descriptive_secondary_analysis_after_prior_test_reuse",
+    "confirmatory_claims_allowed must be false",
+    "optional modules with enabled=true but unimplemented must be rejected by preflight",
+    "output root must not overwrite WP-A/WP-B formal directories",
+    "formal reused-test evaluation requires analysis lock + explicit open consent",
+    "no blind_test or confirmatory wording for Re=250/650 reuse"
+  ],
+  "placeholder_resolution_required": [
+    "canonical_noise_scale_artifact_sha256",
+    "comparisons_sha256",
+    "artifact_manifest_sha256",
+    "noise_scale_sha256",
+    "every evaluation unit checkpoint path/hash in the artifact manifest",
+    "owner approval fields"
+  ],
+  "approval": {
+    "status": "pending",
+    "approved_by": null,
+    "approved_at_utc": null,
+    "approval_note": "Code readiness does not equal formal protocol approval."
+  }
+}

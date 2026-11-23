@@ -1,0 +1,124 @@
+{
+  "schema_version": "wp_c_comparisons_v1",
+  "comparison_set_id": "wp_c_noise_robustness_descriptive_example_v0",
+  "approval_status": "pending",
+  "example_not_formal": true,
+  "claim_classification": "descriptive_secondary_analysis_after_prior_test_reuse",
+  "confirmatory_claims_allowed": false,
+  "test_reuse_positioning": "descriptive_secondary_analysis_after_prior_test_reuse",
+  "notes": [
+    "EXAMPLE ONLY. Awaiting owner approval before formal WP-C statistics.",
+    "Re=250/650 were already opened in WP-A and WP-B; WP-C reuse is descriptive secondary analysis only.",
+    "No confirmatory exact Wilcoxon/Holm is authorized.",
+    "Independent model unit is model_repeat_id; noise_seed is nested measurement realization; Re and complete cycles are nested repeated measurements.",
+    "Clean baseline (noise_level=0) is evaluated once and paired to every non-zero noise realization; it must not be duplicated per noise_seed."
+  ],
+  "hierarchy": {
+    "bootstrap_levels": ["model_repeat_id", "noise_seed", "re_id", "complete_cycle"],
+    "exclude_incomplete_cycles_from_block_bootstrap_by_default": true,
+    "do_not_count_noise_seed_or_cycle_as_independent_model_repeat": true
+  },
+  "default_noise_levels": [0.0, 0.01, 0.03, 0.05, 0.10],
+  "default_noise_seeds": [500000, 500001, 500002, 500003, 500004],
+  "comparisons": [
+    {
+      "comparison_id": "noise_degradation_fixed_mlp_n12_closed_l2",
+      "comparison_type": "noise_degradation_vs_clean",
+      "model_family": "fixed_mlp",
+      "strategy": "uniform",
+      "nsensor": 12,
+      "metric": "overall_rel_l2_gauge_sameden",
+      "split": "test",
+      "granularity": "per_re",
+      "baseline_noise_level": 0.0,
+      "noise_levels": [0.01, 0.03, 0.05, 0.10],
+      "paired_unit": "model_repeat_id",
+      "pairing_requires_same_noise_fingerprint_base_z": true,
+      "confirmatory": false
+    },
+    {
+      "comparison_id": "noise_degradation_deepsets_n12_closed_l2",
+      "comparison_type": "noise_degradation_vs_clean",
+      "model_family": "deepsets_dynamic",
+      "strategy": "uniform",
+      "nsensor": 12,
+      "metric": "overall_rel_l2_gauge_sameden",
+      "split": "test",
+      "granularity": "per_re",
+      "baseline_noise_level": 0.0,
+      "noise_levels": [0.01, 0.03, 0.05, 0.10],
+      "paired_unit": "model_repeat_id",
+      "pairing_requires_same_noise_fingerprint_base_z": true,
+      "confirmatory": false
+    },
+    {
+      "comparison_id": "dynamic_vs_fixed_n12_noise0p03_re_rmse",
+      "comparison_type": "dynamic_vs_fixed_same_layout_noise",
+      "metric": "re_rmse",
+      "split": "test",
+      "granularity": "per_re",
+      "nsensor": 12,
+      "noise_level": 0.03,
+      "model_family_a": "deepsets_dynamic",
+      "model_family_b": "fixed_mlp",
+      "requires_manifest_pairing_key": true,
+      "paired_unit": "model_repeat_id",
+      "pairing_requires_same_noise_fingerprint_base_z": true,
+      "confirmatory": false
+    },
+    {
+      "comparison_id": "dynamic_vs_fixed_n12_noise0p03_closed_l2",
+      "comparison_type": "dynamic_vs_fixed_same_layout_noise",
+      "metric": "overall_rel_l2_gauge_sameden",
+      "split": "test",
+      "granularity": "per_re",
+      "nsensor": 12,
+      "noise_level": 0.03,
+      "model_family_a": "deepsets_dynamic",
+      "model_family_b": "fixed_mlp",
+      "requires_manifest_pairing_key": true,
+      "paired_unit": "model_repeat_id",
+      "pairing_requires_same_noise_fingerprint_base_z": true,
+      "confirmatory": false
+    },
+    {
+      "comparison_id": "ranking_stability_fixed_mlp_closed_l2_by_nsensor",
+      "comparison_type": "strategy_ranking_stability_vs_clean",
+      "model_family": "fixed_mlp",
+      "metric": "overall_rel_l2_gauge_sameden",
+      "split": "test",
+      "granularity": "equal_re_macro",
+      "nsensor_list": [6, 12, 24, 48],
+      "strategies_from_manifest": true,
+      "noise_levels": [0.01, 0.03, 0.05, 0.10],
+      "rank_statistics": ["spearman", "kendall", "top1_changed", "rank_displacement"],
+      "confirmatory": false
+    },
+    {
+      "comparison_id": "delta_e_sensor_fixed_mlp_n24",
+      "comparison_type": "delta_e_sensor_vs_clean",
+      "model_family": "fixed_mlp",
+      "nsensor": 24,
+      "metric": "delta_e_sensor",
+      "metric_definition": "E_closed(noise) - E_oracle; negative values retained",
+      "split": "test",
+      "granularity": "per_re",
+      "baseline_noise_level": 0.0,
+      "noise_levels": [0.01, 0.03, 0.05, 0.10],
+      "paired_unit": "model_repeat_id",
+      "confirmatory": false
+    }
+  ],
+  "forbidden": [
+    "confirmatory exact Wilcoxon",
+    "Holm correction families over confirmatory claims",
+    "asymptotic p-value fallback",
+    "duplicating clean baseline per noise_seed",
+    "adding comparisons after inspecting test results"
+  ],
+  "approval": {
+    "status": "pending",
+    "approved_by": null,
+    "approved_at_utc": null
+  }
+}

@@ -1,0 +1,84 @@
+{
+  "_comment": "Sanitized WP-D example protocol configuration (relative paths only, not for formal claims).",
+  "schema_version": "wp_d_protocol_v0",
+  "work_package": "wp_d",
+  "protocol_id": "wp_d_reconstruction_physics_example_v1",
+  "approval_status": "pending",
+  "example_not_formal": true,
+  "claim_classification": "descriptive_secondary_analysis_after_prior_test_reuse",
+  "confirmatory_claims_allowed": false,
+  "data_root": "./data",
+  "processed_dir": "./data/processed_data_base_60",
+  "runs_dir": "./runs/wp_d",
+  "fold": "default",
+  "paths": {
+    "output_root": "./runs/wp_d",
+    "ppinn_checkpoint": "./runs/pinn_runs/best_ppinn.pt",
+    "encoder_checkpoint": "./runs/mlp_runs/best_model.pt",
+    "pod_checkpoint": "./runs/pod_runs/pod_model.npz",
+    "comparisons_path": "./configs/experiments/wp_d/comparisons.example.json",
+    "analysis_lock_path": "./configs/experiments/wp_d/analysis_lock.example.json",
+    "ssim_scale_path": "./runs/wp_d/frozen_metrics/ssim_scale_artifact.json",
+    "physics_design_path": "./runs/wp_d/frozen_metrics/physics_design_val.npz"
+  },
+  "dataset": {
+    "mesh_file": "mesh.h5",
+    "candidate_count": 60
+  },
+  "re_split": {
+    "re_fold_id": "default",
+    "train_re": [200, 225, 275, 300, 350, 400, 500, 550, 600, 700, 750, 850, 900, 1000],
+    "val_re": [450, 800],
+    "test_re": [250, 650],
+    "strict_re_split": true,
+    "test_positioning": "held_out_interpolation_inside_envelope_[200,1000]",
+    "test_reuse_positioning": "descriptive_secondary_analysis_after_prior_test_reuse"
+  },
+  "metric_contract": {
+    "primary_field_metric": "overall_rel_l2_gauge_sameden",
+    "delta_e_sensor": "E_closed - E_oracle",
+    "wall_probe_primary": "wall_probe_p_rel_l2_gauge_sameden",
+    "wake_primary": "wake_omega_rel_l2",
+    "structure_primary": "overall_mesh_local_ssim",
+    "physics_intrinsic": "physics_overall_rmse",
+    "complete_cycles_only": true,
+    "enable_vorticity": true,
+    "enable_ssim": true
+  },
+  "d1_reconstruction_matrix": {
+    "experiment_id": "EX-9",
+    "deterministic_strategies": [
+      "uniform",
+      "physics",
+      "greedy",
+      "qr_pod",
+      "linreg_greedy",
+      "amortized_chain_greedy"
+    ],
+    "sensor_counts": [6, 12, 24, 48],
+    "model_family": ["fixed_mlp", "deepsets_dynamic"],
+    "model_repeat_id": [0, 1, 2, 3, 4],
+    "ppinn_pairing_rule": "paired_by_repeat_id_with_budget_matched_lambda1"
+  },
+  "d2_physics_regularization_matrix": {
+    "experiment_id": "EX-10",
+    "lambda_phys": [0.0, 1.0, 2.0],
+    "ppinn_repeat_id": [0, 1, 2, 3, 4],
+    "proposed_seeds": [42042, 42043, 42044, 42045, 42046],
+    "closed_loop_anchor_only": {
+      "strategy": "uniform",
+      "nsensor": 24,
+      "model_family": "fixed_mlp"
+    }
+  },
+  "statistical_protocol": {
+    "paired_unit": "model_repeat_id_or_ppinn_repeat_id",
+    "n_bootstrap": 2000,
+    "bootstrap_seed": 20260731,
+    "confirmatory_tests_enabled": false,
+    "forbid_exact_wilcoxon": true,
+    "forbid_holm": true,
+    "exclude_incomplete_cycles_by_default": true
+  },
+  "stages": ["preflight"]
+}

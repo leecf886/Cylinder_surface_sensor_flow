@@ -1,0 +1,47 @@
+{
+  "schema_version": "wp_d_analysis_lock_record_v1",
+  "lock_id": "wp_d_analysis_lock_example_pending_v0",
+  "approval_status": "pending",
+  "example_not_formal": true,
+  "claim_classification": "descriptive_secondary_analysis_after_prior_test_reuse",
+  "confirmatory_claims_allowed": false,
+  "prior_test_reuse": true,
+  "prior_test_reuse_declaration": "Re=250/650 were already opened in WP-A, WP-B, and WP-C; WP-D may reuse them only as descriptive secondary analysis after prior test reuse, never as a new blind confirmatory test.",
+  "not_a_new_blind_test_lock": true,
+  "description": "Pending WP-D analysis lock template (relative paths only). Never auto-approved by code.",
+  "frozen_artifacts": {
+    "protocol_path": "./configs/experiments/wp_d/protocol.example.json",
+    "protocol_sha256": "<PLACEHOLDER_PROTOCOL_SHA256>",
+    "comparisons_path": "./configs/experiments/wp_d/comparisons.example.json",
+    "comparisons_sha256": "<PLACEHOLDER_COMPARISONS_SHA256>",
+    "ssim_scale_path": "./runs/wp_d/frozen_metrics/ssim_scale_artifact.json",
+    "ssim_scale_sha256": "<PLACEHOLDER_SSIM_SCALE_SHA256>",
+    "physics_design_path": "./runs/wp_d/frozen_metrics/physics_design_val.npz",
+    "physics_design_sha256": "<PLACEHOLDER_PHYSICS_DESIGN_SHA256>"
+  },
+  "expected_matrix": {
+    "split": "test",
+    "re_ids": [250, 650],
+    "d1_unit_count": 240,
+    "d2_closed_loop_anchor_count": 15,
+    "matrix_expected_unit_count": 255
+  },
+  "code_identity": {
+    "git_commit": "<PLACEHOLDER_GIT_COMMIT>",
+    "git_dirty": true,
+    "git_status_short": "",
+    "git_status_sha256": "<PLACEHOLDER_GIT_STATUS_SHA256>"
+  },
+  "owner_approval": {
+    "status": "pending",
+    "approver": null,
+    "approved_utc": null,
+    "notes": "Template only. Replace placeholders and set approval_status='approved' only after owner sign-off."
+  },
+  "forbidden": [
+    "auto_approve_by_code",
+    "new_blind_confirmatory_test_claim",
+    "wilcoxon_holm_confirmatory_inference",
+    "opening_re250_re650_without_open_reused_test_authorization"
+  ]
+}

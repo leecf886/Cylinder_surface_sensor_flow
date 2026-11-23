@@ -1,0 +1,163 @@
+{
+  "schema_version": "wp-a-preregistration-scheme-a-default-fold-v1",
+  "status": "example_template",
+  "approval_status": "pending",
+  "example_not_formal": true,
+  "research_scope": {
+    "paper": "P1",
+    "work_package": "WP-A",
+    "scheme": "A_fixed_default_fold_validation_selected_ppinn",
+    "primary_claim_metric": "sensor_excess",
+    "primary_field_metric": "overall_rel_l2_gauge_sameden",
+    "scope_limit": "One predefined default Re split in a 2D periodic cylinder wake with a fixed 60-location surface candidate pool",
+    "inference_limit": "Algorithmic performance under the single predefined default split and paired training seeds"
+  },
+  "fold_protocol": {
+    "fold_ids": ["default"],
+    "train_re": [200, 225, 275, 300, 350, 400, 500, 550, 600, 700, 750, 850, 900, 1000],
+    "val_re": [450, 800],
+    "test_re": [250, 650],
+    "strict_re_split": true,
+    "forbidden_folds": ["loo_450", "loo_800"]
+  },
+  "ppinn_selection": {
+    "training_action": "none",
+    "selection_action": "validation-only oracle re-evaluation on default-fold validation Re",
+    "selection_metric": "overall_rel_l2_gauge_sameden",
+    "metric_direction": "lower_better",
+    "test_artifacts_read": false,
+    "test_metric_values_read": false,
+    "candidates": [
+      {"label": "v1", "checkpoint": "./runs/pinn_runs/v1/best_ppinn.pt"},
+      {"label": "v2", "checkpoint": "./runs/pinn_runs/v2/best_ppinn.pt"}
+    ]
+  },
+  "layout_protocol": {
+    "candidate_count": 60,
+    "sensor_counts": [6, 12, 24, 48],
+    "main_strategies": [
+      "uniform",
+      "physics",
+      "greedy",
+      "qr_pod",
+      "linreg_greedy",
+      "amortized_chain_greedy",
+      "pod_greedy",
+      "random"
+    ],
+    "deterministic_repeats": 5,
+    "random_layout_repeats": 20,
+    "random_train_repeats": 1,
+    "selection_domain": "validation Re only",
+    "chain_metric": "overall_rel_l2_gauge_sameden",
+    "final_encoder": "mlp",
+    "test_selection_forbidden": true
+  },
+  "statistical_protocol": {
+    "paired_unit": "seed",
+    "scalar_unit": "(default_fold, train_seed)",
+    "planned_n_paired": 5,
+    "complete_cycles_only": true,
+    "re_aggregation": "macro average over Re after within-Re complete-cycle aggregation",
+    "bootstrap": "paired seed -> Re cluster -> complete cycle block",
+    "confirmatory_tests_enabled": false
+  },
+  "comparisons": [
+    {
+      "comparison_id": "desc_scheme_a_amortized_vs_uniform_sensor_excess_n12",
+      "strategy_a": "amortized_chain_greedy",
+      "strategy_b": "uniform",
+      "evaluator": "ppinn_closed_loop",
+      "metric": "sensor_excess",
+      "metric_direction": "lower_better",
+      "granularity": "per_cycle",
+      "include_incomplete_cycles": false,
+      "nsensor": 12,
+      "split": "val",
+      "noise_level": 0,
+      "paired_unit": "seed",
+      "confirmatory": false,
+      "holm_family": null
+    },
+    {
+      "comparison_id": "desc_scheme_a_amortized_vs_uniform_sensor_excess_n24",
+      "strategy_a": "amortized_chain_greedy",
+      "strategy_b": "uniform",
+      "evaluator": "ppinn_closed_loop",
+      "metric": "sensor_excess",
+      "metric_direction": "lower_better",
+      "granularity": "per_cycle",
+      "include_incomplete_cycles": false,
+      "nsensor": 24,
+      "split": "val",
+      "noise_level": 0,
+      "paired_unit": "seed",
+      "confirmatory": false,
+      "holm_family": null
+    },
+    {
+      "comparison_id": "desc_scheme_a_amortized_vs_linreg_sensor_excess_n12",
+      "strategy_a": "amortized_chain_greedy",
+      "strategy_b": "linreg_greedy",
+      "evaluator": "ppinn_closed_loop",
+      "metric": "sensor_excess",
+      "metric_direction": "lower_better",
+      "granularity": "per_cycle",
+      "include_incomplete_cycles": false,
+      "nsensor": 12,
+      "split": "val",
+      "noise_level": 0,
+      "paired_unit": "seed",
+      "confirmatory": false,
+      "holm_family": null
+    },
+    {
+      "comparison_id": "desc_scheme_a_linreg_vs_uniform_phase_crmse_n12",
+      "strategy_a": "linreg_greedy",
+      "strategy_b": "uniform",
+      "evaluator": "mlp",
+      "metric": "phase_crmse",
+      "metric_direction": "lower_better",
+      "granularity": "per_cycle",
+      "include_incomplete_cycles": false,
+      "nsensor": 12,
+      "split": "val",
+      "noise_level": 0,
+      "paired_unit": "seed",
+      "confirmatory": false,
+      "holm_family": null
+    },
+    {
+      "comparison_id": "desc_scheme_a_qr_pod_vs_uniform_pod_gauge_n24",
+      "strategy_a": "qr_pod",
+      "strategy_b": "uniform",
+      "evaluator": "pod",
+      "metric": "overall_rel_l2_gauge_sameden",
+      "metric_direction": "lower_better",
+      "granularity": "per_cycle",
+      "include_incomplete_cycles": false,
+      "nsensor": 24,
+      "split": "val",
+      "noise_level": 0,
+      "paired_unit": "re_fold",
+      "confirmatory": false,
+      "holm_family": null
+    },
+    {
+      "comparison_id": "desc_scheme_a_pod_greedy_vs_uniform_pod_gauge_n24",
+      "strategy_a": "pod_greedy",
+      "strategy_b": "uniform",
+      "evaluator": "pod",
+      "metric": "overall_rel_l2_gauge_sameden",
+      "metric_direction": "lower_better",
+      "granularity": "per_cycle",
+      "include_incomplete_cycles": false,
+      "nsensor": 24,
+      "split": "val",
+      "noise_level": 0,
+      "paired_unit": "re_fold",
+      "confirmatory": false,
+      "holm_family": null
+    }
+  ]
+}

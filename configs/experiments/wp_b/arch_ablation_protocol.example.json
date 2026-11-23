@@ -1,0 +1,58 @@
+{
+  "_comment": "Sanitized WP-B 8-variant architecture ablation example protocol (relative paths only).",
+  "schema_version": "wp_b_arch_ablation_protocol_v1",
+  "protocol_id": "wp_b_arch_ablation_example_v1",
+  "approval_status": "pending",
+  "example_not_formal": true,
+  "mode": "arch_ablation",
+  "data_root": "./data",
+  "processed_dir": "./data/processed_data_base_60",
+  "runs_dir": "./runs/wp_b_arch_ablation",
+  "fold": "default",
+  "data_boundary": {
+    "default_processed_data": "./data/processed_data_base_60",
+    "allowed_processed_data_variants": ["processed_data_base_60"],
+    "candidate_count": 60,
+    "candidate_pool_source": "mesh.h5:/sensors/sensor_theta"
+  },
+  "paths": {
+    "output_root": "./runs/wp_b_arch_ablation",
+    "layout_manifest_path": "./configs/experiments/wp_b/layout_holdout.example.json",
+    "ppinn_checkpoint": "./runs/wp_a/ppinn_selection/best_ppinn.pt"
+  },
+  "re_split": {
+    "re_fold_id": "default",
+    "train_re": [200, 225, 275, 300, 350, 400, 500, 550, 600, 700, 750, 850, 900, 1000],
+    "val_re": [450, 800],
+    "test_re": [250, 650],
+    "strict_re_split": true,
+    "test_reuse_positioning": "post_hoc_descriptive_architecture_ablation"
+  },
+  "model_variants": {
+    "encoder": "dynamic_arch_ablation",
+    "schema_name": "dynamic_arch_ablation_schema_v1",
+    "activation_policy": "relu_for_all_existing_hidden_nonlinearities",
+    "reference_variant_id": "arch_main",
+    "required_variant_ids": [
+      "arch_main",
+      "arch_identity_pool_mlp",
+      "arch_identity_pool_linear",
+      "arch_linear_phi_pool_mlp",
+      "arch_main_phi_pool_linear",
+      "arch_main_phi_slot_flat_linear",
+      "arch_fourier_k2_ridge",
+      "arch_main_phi_slot_flat_mlp"
+    ]
+  },
+  "training": {
+    "optimizer": "adam",
+    "learning_rate": 0.001,
+    "batch_size": 512,
+    "num_epochs": 200,
+    "training_sensor_counts": [6, 12, 24, 48]
+  },
+  "seeds": {
+    "base_seed": 42,
+    "model_repeat_ids": [0, 1, 2, 3, 4]
+  }
+}
