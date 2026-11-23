@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from cylinder_flow.artifacts.tracking import layout_fingerprint
 from cylinder_flow.data.normalization import Normalizer
 from cylinder_flow.data.sampling import DynamicSensorDataset
 from cylinder_flow.data.splits import ReSplit
@@ -32,17 +33,6 @@ DYNAMIC_VALIDATION_LAYOUTS_PER_BUDGET: int = 8
 DYNAMIC_VALIDATION_PANEL_LAYOUTS_PER_BUDGET: int = 8
 DYNAMIC_VALIDATION_METRICS: Tuple[str, ...] = ("val_loss_total", "re_rmse", "phase_crmse")
 DYNAMIC_VALIDATION_AGGREGATION_SCHEMA: str = "wp_a_dynamic_validation_aggregation_v1"
-
-
-def layout_fingerprint(sensor_indices: Sequence[int]) -> str:
-    """Return a stable hex fingerprint of a sensor layout.
-
-    The fingerprint is the SHA-256 hex digest of the sorted, zero-based
-    sensor indices encoded as a comma-separated string.
-    """
-    sorted_idx = sorted(int(x) for x in sensor_indices)
-    payload = ",".join(str(i) for i in sorted_idx)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def build_dynamic_validation_panel(
