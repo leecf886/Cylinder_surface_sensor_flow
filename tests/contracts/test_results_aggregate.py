@@ -252,6 +252,9 @@ def test_re_split_locked_test_gate_and_output_isolation(tmp_path: Path) -> None:
         validate_re_split_locked_test_gate([250], re_split=split)
     with pytest.raises(PermissionError, match="650"):
         validate_re_split_locked_test_gate([450, 650], allow_test=False)
+    alternate = ReSplit(train_re=[200], val_re=[450], test_re=[900])
+    with pytest.raises(PermissionError, match="250"):
+        validate_re_split_locked_test_gate([250], re_split=alternate)
 
     # allow_test=True still blocked without approved lock
     with pytest.raises(PermissionError, match="approved lock"):

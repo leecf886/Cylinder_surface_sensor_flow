@@ -2859,6 +2859,18 @@ class _WPDLeaf:
     nsensor: Optional[int] = None
 
 
+def _wp_d_experiment_id(row: Mapping[str, str]) -> str:
+    declared = str(row.get("experiment_id") or "")
+    if declared:
+        return declared
+    unit_id = str(row.get("unit_id") or "")
+    return next(
+        (experiment for experiment, prefixes in _WP_D_EXPERIMENT_UNIT_PREFIXES.items()
+         if unit_id.startswith(prefixes)),
+        "",
+    )
+
+
 def _wp_d_filter_rows(rows: Sequence[Mapping[str, str]], comp: Mapping[str, Any]) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
     evaluator = comp.get("evaluator")
@@ -2866,10 +2878,8 @@ def _wp_d_filter_rows(rows: Sequence[Mapping[str, str]], comp: Mapping[str, Any]
     nsensor = comp.get("nsensor")
     model_family = comp.get("model_family")
     experiment_id = str(comp.get("experiment_id", "") or "")
-    allowed_prefixes = _WP_D_EXPERIMENT_UNIT_PREFIXES.get(experiment_id)
     for row in rows:
-        unit_id = str(row.get("unit_id", "") or "")
-        if allowed_prefixes is not None and not unit_id.startswith(allowed_prefixes):
+        if experiment_id and _wp_d_experiment_id(row) != experiment_id:
             continue
         if evaluator and str(row.get("evaluator", "")) != str(evaluator):
             continue
@@ -3270,6 +3280,8 @@ def build_wp_d_lambda_pareto_table(
     """Build WP-D Pareto table: test oracle field error vs validation intrinsic physics RMSE."""
     by_key: Dict[Tuple[int, float], Dict[str, float]] = defaultdict(dict)
     for row in rows:
+        if _wp_d_experiment_id(row) not in {"", "EX-10"}:
+            continue
         if _is_inference_metric(str(row.get("metric", ""))):
             continue
         lam = _safe_float(row.get("lambda_phys"))

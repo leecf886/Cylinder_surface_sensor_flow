@@ -12,11 +12,15 @@ import pytest
 import torch
 
 from cylinder_flow.analysis import aggregate_wp_d_results, has_matplotlib
-from cylinder_flow.artifacts import LONG_TABLE_FIELDS, read_metrics_long, write_metrics_long
+from cylinder_flow.artifacts import LONG_TABLE_FIELDS, layout_id_short, read_metrics_long, sha256_file, write_metrics_long
+from cylinder_flow.artifacts.checkpoints import save_deepsets_checkpoint, save_mlp_checkpoint, save_ppinn_checkpoint
+from cylinder_flow.cli import main as cli_main
+from cylinder_flow.data.h5 import save_mesh, save_re_case
 from cylinder_flow.data.normalization import Normalizer
 from cylinder_flow.data.splits import ReSplit
 from cylinder_flow.data.types import MeshData, ReCaseData
 from cylinder_flow.evaluation.spatial import build_scale_artifact_from_fields
+from cylinder_flow.models.deepsets import DynamicSetSensorEncoder, positions_from_theta
 from cylinder_flow.models.mlp import SensorMLP
 from cylinder_flow.models.pod import SurfacePOD
 from cylinder_flow.models.ppinn import PPINNModel
@@ -51,9 +55,9 @@ def _make_mesh(nroi: int = 36, ncand: int = 12, d: float = 0.01) -> MeshData:
     )
 
 
-def _make_case(re_val: float, mesh: MeshData, *, nt: int = 12, seed: int = 42) -> ReCaseData:
+def _make_case(re_val: float, mesh: MeshData, *, nt: int = 12, seed: int = 42, phase_offset: float = 0.0) -> ReCaseData:
     rng = np.random.default_rng(seed + int(round(re_val)))
-    phase = np.mod(np.linspace(0.0, 4.0 * math.pi, nt, endpoint=False), 2.0 * math.pi)
+    phase = np.mod(np.linspace(0.0, 4.0 * math.pi, nt, endpoint=False) + phase_offset, 2.0 * math.pi)
 
     sensor_uvp = rng.standard_normal((nt, mesh.ncand, 3)).astype(np.float32)
     sensor_uvp[:, :, 0] += 0.5
@@ -421,6 +425,107 @@ def test_wp_d_full_stage_pipeline_and_report(tmp_path: Path) -> None:
     assert Path(plot_meta["outputs"]["reconstruction_per_re_csv"]).is_file()
     if has_matplotlib():
         assert plot_meta["png"]["reconstruction_per_re_png"] is True
+
+
+def test_wp_d_cli_runs_frozen_reconstruction_and_physics_matrix(tmp_path: Path, capsys: Any) -> None:
+    mesh = _make_mesh()
+    case = _make_case(450, mesh, nt=24, phase_offset=1.5)
+    save_mesh(tmp_path / "mesh.h5", mesh)
+    save_re_case(tmp_path / "Re450.h5", case)
+    save_re_case(tmp_path / "Re800.h5", _make_case(800, mesh, nt=24))
+
+    layout = [0, 2, 4, 6, 8, 10]
+    mlp_path = save_mlp_checkpoint(
+        tmp_path / "mlp.pt", SensorMLP(input_dim=18, hidden_dims=(8,)),
+        Normalizer(method="none").fit(case.get_sensors(layout, flatten=True)),
+        Normalizer(method="minmax").fit(np.array([200, 1000])), layout,
+    )
+    ds_path = save_deepsets_checkpoint(
+        tmp_path / "ds.pt",
+        DynamicSetSensorEncoder(candidate_count=mesh.ncand, embed_dim=8, phi_hidden=(8,), rho_hidden=(8,)),
+        positions_from_theta(mesh.sensor_theta), [6], [0, 0, 0], [1, 1, 1], [200, 400],
+        re_normalizer=Normalizer(method="minmax").fit(np.array([200, 1000])),
+        default_sensor_indices=layout,
+    )
+    pinn_paths = {
+        lam: save_ppinn_checkpoint(tmp_path / f"pinn{lam}.pt", PPINNModel(hidden_dims=(8,)), save_config_json=False)
+        for lam in (0, 1)
+    }
+
+    design = tmp_path / "physics.npz"
+    np.savez(design, x=[0.01, 0.02], y=[0.012, 0.017], re=[450, 800], phi=[0.5, 0.3])
+    units = []
+    for exp, family, lam, encoder_path in (
+        ("EX-9", "fixed_mlp", 1, mlp_path), ("EX-9", "deepsets_dynamic", 1, ds_path),
+        ("EX-10", "fixed_mlp", 0, mlp_path), ("EX-10", "fixed_mlp", 1, mlp_path),
+    ):
+        units.append({
+            "unit_id": f"{exp}_{family}_{lam}", "experiment_id": exp,
+            "model_family": family, "strategy": "uniform", "nsensor": 6,
+            "layout_id": layout_id_short(layout), "global_sensor_indices": layout,
+            "model_repeat_id": 0, "ppinn_repeat_id": 0, "lambda_phys": lam,
+            "pairing_key": "fixed_panel_repeat0", "train_seed": 42,
+            "ppinn_checkpoint_path": pinn_paths[lam].name, "ppinn_checkpoint_sha256": sha256_file(pinn_paths[lam]),
+            "encoder_checkpoint_path": encoder_path.name, "encoder_checkpoint_sha256": sha256_file(encoder_path),
+        })
+    manifest_path = tmp_path / "manifest.json"
+    manifest = {
+        "expected_unit_count": len(units), "evaluation_units": units,
+        "frozen_operator_artifacts": {"physics_design_path": design.name, "physics_design_sha256": sha256_file(design)},
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    comparisons_path = _write_val_comparisons(tmp_path / "comparisons.json")
+    comparisons = json.loads(comparisons_path.read_text(encoding="utf-8"))
+    for comp in comparisons["comparisons"]:
+        comp["experiment_id"] = "EX-10" if comp["comparison_type"] == "lambda_phys_paired" else "EX-9"
+    comparisons_path.write_text(json.dumps(comparisons), encoding="utf-8")
+    protocol = tmp_path / "protocol.json"
+    protocol.write_text(json.dumps({
+        "processed_dir": str(tmp_path),
+        "paths": {
+            "artifact_manifest_path": str(manifest_path), "comparisons_path": str(comparisons_path),
+            "output_root": str(tmp_path / "out"),
+        },
+        "metric_contract": {"enable_vorticity": False, "enable_ssim": False},
+        "statistical_protocol": {"n_bootstrap": 20},
+        "d1_reconstruction_matrix": {"deterministic_strategies": ["uniform"], "sensor_counts": [6], "model_repeat_id": [0]},
+        "d2_physics_regularization_matrix": {
+            "lambda_phys": [0, 1], "ppinn_repeat_id": [0],
+            "closed_loop_anchor_only": {"model_family": "fixed_mlp", "strategy": "uniform", "nsensor": 6},
+        },
+    }), encoding="utf-8")
+    command = ["wp-d", "--config", str(protocol), "--stages", "evaluate,aggregate,stats"]
+    assert cli_main(command) == 0
+    stages = json.loads(capsys.readouterr().out)["stage_results"]
+    summary = stages["evaluate"]
+    assert summary["n_units_expected"] == summary["n_units_complete"] == 4
+    rows = read_metrics_long(summary["outputs"]["metrics_long_csv"])
+    assert {row["unit_id"] for row in rows} == {unit["unit_id"] for unit in units}
+    for row in rows:
+        unit = next(u for u in units if u["unit_id"] == row["unit_id"])
+        assert row["model_family"] == unit["model_family"]
+        assert float(row["lambda_phys"]) == unit["lambda_phys"]
+        assert row["checkpoint_ppinn_sha256"] == unit["ppinn_checkpoint_sha256"]
+        assert row["layout_id"] == unit["layout_id"]
+        assert row["split"] == "val" and row["train_seed"] == "42"
+    assert {row["unit_id"] for row in rows if row["metric"] == "physics_overall_rmse"} == {unit["unit_id"] for unit in units}
+    assert {row["unit_id"] for row in rows if row["metric"] == "closed_input_physics_overall_rmse"} == {
+        unit["unit_id"] for unit in units if unit["experiment_id"] == "EX-10"
+    }
+    per_re = [row for row in rows if row["granularity"] == "per_re" and row["metric"] == PRIMARY_METRIC]
+    assert {row["n_snapshots"] for row in per_re if row["re_id"] == "450"} == {"12"}
+    assert {row["n_snapshots"] for row in per_re if row["re_id"] == "800"} == {"24"}
+    comparisons_out = read_metrics_long(stages["stats"]["stats_csv"])
+    assert {row["experiment_id"]: row["n_paired"] for row in comparisons_out} == {"EX-9": "1", "EX-10": "1"}
+
+    np.savez(design, x=[0.02], y=[0.01], re=[450], phi=[0.8])
+    with pytest.raises(ValueError, match="physics design SHA-256 mismatch"):
+        cli_main(command)
+    manifest["evaluation_units"] = units[:-1]
+    manifest["expected_unit_count"] -= 1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="D.2 matrix mismatch"):
+        cli_main(command)
 
 
 def test_build_reconstruction_report_with_pareto_and_families(tmp_path: Path) -> None:

@@ -31,6 +31,7 @@ from cylinder_flow.artifacts import (
     layout_id_short,
     load_json_manifest,
     read_metrics_long,
+    require_approved_status,
     select_re_fold,
     sha256_array,
     sha256_file,
@@ -43,6 +44,8 @@ from cylinder_flow.artifacts import (
     write_run_meta,
 )
 from cylinder_flow.artifacts.checkpoints import (
+    AblationPackage,
+    DeepSetsPackage,
     LegacyPPINNPackage,
     load_ablation_checkpoint,
     load_deepsets_checkpoint,
@@ -54,6 +57,7 @@ from cylinder_flow.data.h5 import load_mesh, load_re_cases
 from cylinder_flow.data.normalization import Normalizer
 from cylinder_flow.data.splits import ReSplit
 from cylinder_flow.data.types import MeshData, ReCaseData
+from cylinder_flow.evaluation.cycles import detect_cycles_from_phase
 from cylinder_flow.evaluation.field import PressureGaugeAccum
 from cylinder_flow.evaluation.runner import (
     enforce_locked_test_re_guard,
@@ -71,6 +75,7 @@ from cylinder_flow.evaluation.spatial import (
     wake_mask,
 )
 from cylinder_flow.inference import reconstruct_field_closed_loop, reconstruct_field_oracle
+from cylinder_flow.models.deepsets import is_dynamic_token_regressor, positions_from_theta
 from cylinder_flow.models.pod import SurfacePOD
 from cylinder_flow.models.ppinn import PPINNModel
 from cylinder_flow.physics.residuals import compute_pde_residuals
@@ -90,6 +95,7 @@ REQUIRED_CLAIM: str = "descriptive_secondary_analysis_after_prior_test_reuse"
 
 WP_D_LONG_EXTRA_FIELDS: Tuple[str, ...] = (
     "protocol_id",
+    "experiment_id",
     "protocol_hash",
     "comparisons_hash",
     "manifest_hash",
@@ -129,6 +135,7 @@ class WPDConfig:
     protocol_path: Optional[Path] = None
     comparisons_path: Optional[Path] = None
     lock_manifest_path: Optional[Path] = None
+    artifact_manifest_path: Optional[Path] = None
     ppinn_checkpoint: Optional[Path] = None
     encoder_checkpoint: Optional[Path] = None
     pod_checkpoint: Optional[Path] = None
@@ -175,7 +182,7 @@ def _find_repo_root(start: Path) -> Path:
             (candidate / "src").is_dir() and (candidate / "configs").is_dir()
         ):
             return candidate
-    return Path(__file__).resolve().parents[3]
+    return resolved.parent if resolved.is_file() else resolved
 
 
 def _resolve_optional_path(raw: Any, *, base_dir: Path) -> Optional[Path]:
@@ -236,7 +243,7 @@ def load_wp_d_config(
     if not isinstance(dataset_block, Mapping):
         dataset_block = {}
 
-    metric_block = payload.get("metric_contract", {})
+    metric_block = payload.get("metric_contract", payload.get("metric_contract_ref", {}))
     if not isinstance(metric_block, Mapping):
         metric_block = {}
 
@@ -267,7 +274,7 @@ def load_wp_d_config(
         )
     )
     sensor_counts = tuple(
-        int(n) for n in d1_block.get("sensor_counts", payload.get("sensor_counts", (6, 12, 24, 48)))
+        int(n) for n in d1_block.get("sensor_counts", d1_block.get("nsensor", payload.get("sensor_counts", (6, 12, 24, 48))))
     )
     lambda_phys_values = tuple(
         float(v) for v in d2_block.get("lambda_phys", payload.get("lambda_phys_values", (0.0, 1.0, 2.0)))
@@ -294,6 +301,10 @@ def load_wp_d_config(
                 "analysis_lock_path",
                 paths_section.get("lock_manifest_path", payload.get("lock_manifest_path")),
             ),
+            base_dir=base_dir,
+        ),
+        artifact_manifest_path=_resolve_optional_path(
+            paths_section.get("artifact_manifest_path", paths_section.get("manifest_path", payload.get("artifact_manifest_path"))),
             base_dir=base_dir,
         ),
         ppinn_checkpoint=_resolve_optional_path(
@@ -386,9 +397,10 @@ def _compute_wall_probe_metrics(
     x_normalizer: Optional[Normalizer] = None,
     re_normalizer: Optional[Normalizer] = None,
     output_scale: str = "nondimensional",
+    complete_only: bool = False,
     chunk_size: int = 16384,
     device: Union[str, torch.device] = "cpu",
-) -> Dict[str, Dict[str, Any]]:
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[int, Tuple[float, float]]]:
     """Compute wall-probe gauge-consistent pressure metrics for oracle and closed-loop branches."""
     sensor_xy = _sensor_xy_from_mesh(mesh)
     rho = float(ppinn.rho) if isinstance(ppinn, LegacyPPINNPackage) else 1000.0
@@ -399,9 +411,14 @@ def _compute_wall_probe_metrics(
     oracle_per_re: Dict[str, Dict[str, float]] = {}
     closed_overall = PressureGaugeAccum()
     closed_per_re: Dict[str, Dict[str, float]] = {}
+    encoder_means: Dict[int, Tuple[float, float]] = {}
 
     for case in cases:
         re_id = int(round(float(case.re)))
+        snapshot_indices = (
+            np.flatnonzero(detect_cycles_from_phase(case.phase, time=case.time).snapshot_complete_mask())
+            if complete_only else np.arange(case.nt)
+        )
         p_true = np.asarray(case.sensor_uvp[:, :, 2], dtype=np.float64)
         if mode == "nondimensional":
             p_true = p_true / (pressure_scale(p_mode, rho, float(case.u_inf)) + 1e-12)
@@ -419,7 +436,7 @@ def _compute_wall_probe_metrics(
             device=device,
         )
         acc_o = PressureGaugeAccum()
-        for t in range(case.nt):
+        for t in snapshot_indices:
             acc_o.add_snapshot(pred_oracle[t, :, 2], p_true[t])
         oracle_overall.merge(acc_o)
         om = acc_o.metrics()
@@ -447,7 +464,7 @@ def _compute_wall_probe_metrics(
                 fill_values=None,
                 split_label="val",
             )
-            pred_cl, _ = reconstruct_field_closed_loop(
+            pred_cl, enc_pred = reconstruct_field_closed_loop(
                 mlp=encoder,
                 ppinn=ppinn,
                 mesh_xy=sensor_xy,
@@ -463,8 +480,15 @@ def _compute_wall_probe_metrics(
                 positions=pos,
             )
             acc_c = PressureGaugeAccum()
-            for t in range(case.nt):
+            for t in snapshot_indices:
                 acc_c.add_snapshot(pred_cl[t, :, 2], p_true[t])
+            phases = np.asarray(enc_pred.phase).reshape(-1)[snapshot_indices]
+            re_pred = np.asarray(enc_pred.re).reshape(-1)[snapshot_indices]
+            if re_pred.size:
+                encoder_means[re_id] = (
+                    float(np.mean(re_pred)),
+                    float(np.mod(np.arctan2(np.mean(np.sin(phases)), np.mean(np.cos(phases))), 2.0 * math.pi)),
+                )
             closed_overall.merge(acc_c)
             cm = acc_c.metrics()
             closed_per_re[str(re_id)] = {
@@ -491,7 +515,19 @@ def _compute_wall_probe_metrics(
             },
             "per_re": closed_per_re,
         }
-    return out
+    return out, encoder_means
+
+
+def _physics_design_arrays(design: Mapping[str, Any]) -> Dict[str, np.ndarray]:
+    try:
+        arrays = {key: np.asarray(design[key], dtype=np.float64).reshape(-1) for key in ("x", "y", "re", "phi")}
+    except KeyError as exc:
+        raise ValueError(f"Physics design is missing {exc.args[0]!r}") from exc
+    if len({a.size for a in arrays.values()}) != 1 or not arrays["x"].size:
+        raise ValueError("Physics design x, y, re and phi must have equal nonzero lengths")
+    if any(not np.all(np.isfinite(a)) for a in arrays.values()) or np.any(arrays["re"] <= 0):
+        raise ValueError("Physics design requires finite values and positive Reynolds numbers")
+    return arrays
 
 
 def _compute_physics_intrinsic_metrics(
@@ -499,23 +535,25 @@ def _compute_physics_intrinsic_metrics(
     physics_design: Mapping[str, Any],
     cases_by_re: Mapping[int, ReCaseData],
     device: Union[str, torch.device],
+    *,
+    encoder_means: Optional[Mapping[int, Tuple[float, float]]] = None,
 ) -> Dict[str, float]:
     """Compute PDE residual MAE/RMSE over a physics collocation design using ``compute_st_from_re``."""
     model = ppinn.model if isinstance(ppinn, LegacyPPINNPackage) else ppinn
-    x_arr = np.asarray(physics_design.get("x", []), dtype=np.float64).reshape(-1)
-    y_arr = np.asarray(physics_design.get("y", []), dtype=np.float64).reshape(-1)
-    re_arr = np.asarray(physics_design.get("re", []), dtype=np.float64).reshape(-1)
-    phi_arr = np.asarray(physics_design.get("phi", []), dtype=np.float64).reshape(-1)
-    n = int(x_arr.size)
-    if n == 0 or not (x_arr.shape == y_arr.shape == re_arr.shape == phi_arr.shape):
+    arrays = _physics_design_arrays(physics_design)
+    mask = np.isin(arrays["re"], list(cases_by_re if encoder_means is None else encoder_means))
+    if not mask.any():
         return {}
-
-    ref_case = next(iter(cases_by_re.values()))
-    st_list: List[float] = []
-    for re_v in re_arr:
-        case = cases_by_re.get(int(round(float(re_v))), ref_case)
-        st_list.append(float(compute_st_from_re(float(re_v), float(case.u_inf), float(case.d))))
-    st_arr = np.asarray(st_list, dtype=np.float64)
+    x_arr, y_arr, re_arr, phi_arr = (arrays[key][mask] for key in ("x", "y", "re", "phi"))
+    true_re = re_arr.copy()
+    st_arr = np.empty_like(true_re)
+    for re_v in np.unique(true_re):
+        case = cases_by_re[int(re_v)]
+        points = true_re == re_v
+        st_arr[points] = compute_st_from_re(float(re_v), float(case.u_inf), float(case.d))
+        if encoder_means is not None:
+            re_arr[points], phi_arr[points] = encoder_means[int(re_v)]
+    n = x_arr.size
 
     dev = torch.device(device)
     model.eval()
@@ -627,12 +665,17 @@ def evaluate_wp_d_reconstruction(
     derivative_operator: Optional[UnstructuredDerivativeOperator] = None,
     physics_design: Optional[Mapping[str, Any]] = None,
     unit_id: str = "wp_d_unit_0",
+    experiment_id: str = "",
     model_family: str = "fixed_mlp",
     strategy: str = "uniform",
     lambda_phys: float = 1.0,
-    model_repeat_id: int = 0,
+    model_repeat_id: Optional[int] = 0,
     ppinn_repeat_id: int = 0,
     pairing_key: Optional[str] = None,
+    train_seed: Optional[int] = None,
+    selection_seed: Optional[int] = None,
+    layout_repeat_id: int = 0,
+    train_repeat_id: Optional[int] = None,
     run_id: Optional[str] = None,
     re_fold_id: Optional[str] = None,
     checkpoint_ppinn: str = "",
@@ -658,7 +701,6 @@ def evaluate_wp_d_reconstruction(
         allow_test=allow_test,
         lock_manifest=lock_manifest,
         lock_path=lock_path,
-        require_approved_lock=True,
         allow_example=allow_example_lock,
     )
     enforce_locked_test_re_guard(case_list, allow_test=allow_test, re_split=re_split)
@@ -780,7 +822,7 @@ def evaluate_wp_d_reconstruction(
         )
         e_pod = _extract_macro_primary(pod_res.per_re, pod_res.overall, PRIMARY_METRIC)
 
-    wall_probe = _compute_wall_probe_metrics(
+    wall_probe, encoder_means = _compute_wall_probe_metrics(
         ppinn,
         case_list,
         mesh,
@@ -789,6 +831,7 @@ def evaluate_wp_d_reconstruction(
         x_normalizer=x_normalizer,
         re_normalizer=re_normalizer,
         output_scale=output_scale,
+        complete_only=complete_only,
         chunk_size=chunk_size,
         device=device,
     )
@@ -798,6 +841,10 @@ def evaluate_wp_d_reconstruction(
         _compute_physics_intrinsic_metrics(ppinn, physics_design, cases_by_re, device)
         if physics_design
         else {}
+    )
+    physics_closed = (
+        _compute_physics_intrinsic_metrics(ppinn, physics_design, cases_by_re, device, encoder_means=encoder_means)
+        if physics_design and encoder_means and experiment_id == "EX-10" else {}
     )
 
     resolved_run_id = run_id or f"wp_d_eval__{fold_id}__{unit_id}"
@@ -822,13 +869,14 @@ def evaluate_wp_d_reconstruction(
 
     extra_cols: Dict[str, Any] = {
         "protocol_id": protocol_id,
+        "experiment_id": experiment_id,
         "protocol_hash": resolved_proto_hash,
         "comparisons_hash": comparisons_hash,
         "manifest_hash": resolved_manifest_hash,
         "analysis_lock_sha256": analysis_lock_sha256,
         "model_family": model_family,
         "lambda_phys": float(lambda_phys),
-        "model_repeat_id": int(model_repeat_id),
+        "model_repeat_id": model_repeat_id,
         "ppinn_repeat_id": int(ppinn_repeat_id),
         "pairing_key": pair_key,
         "unit_id": unit_id,
@@ -846,12 +894,17 @@ def evaluate_wp_d_reconstruction(
         "prior_test_reuse": bool(prior_reuse),
         "smoke_not_for_formal": bool(smoke_not_for_formal),
     }
+    train_repeat_id = model_repeat_id if train_repeat_id is None else train_repeat_id
 
     def _enrich(rows: Sequence[Mapping[str, Any]], *, fam: Optional[str] = None) -> List[Dict[str, Any]]:
         out_rows: List[Dict[str, Any]] = []
         for row in rows:
             merged = dict(row)
             merged.update(extra_cols)
+            merged.update(
+                train_seed=train_seed, selection_seed=selection_seed,
+                layout_repeat_id=layout_repeat_id, train_repeat_id=train_repeat_id,
+            )
             if fam is not None:
                 merged["model_family"] = fam
             out_rows.append(merged)
@@ -867,11 +920,7 @@ def evaluate_wp_d_reconstruction(
         nsensor=nsensor_val,
         layout_id=lid,
         selection_data_domain=sel_domain,
-        train_seed=0,
-        selection_seed=0,
-        layout_repeat_id=0,
-        train_repeat_id=model_repeat_id,
-        variance_source="model_repeat_id",
+        variance_source="model_repeat_id" if model_repeat_id is not None else "ppinn_repeat_id",
     )
 
     long_rows.extend(_enrich(evaluate_cases_to_long_rows(oracle_res, evaluator="ppinn_oracle", **common_eval_kw)))
@@ -977,11 +1026,16 @@ def evaluate_wp_d_reconstruction(
                 )
             )
 
-    if physics_intrinsic:
+    for metrics, evaluator in (
+        (physics_intrinsic, "ppinn_oracle"),
+        ({f"closed_input_{key}": value for key, value in physics_closed.items()}, "ppinn_closed_loop"),
+    ):
+        if not metrics:
+            continue
         long_rows.extend(
             _enrich(
                 build_long_rows(
-                    physics_intrinsic,
+                    metrics,
                     run_id=resolved_run_id,
                     stage="wp_d_reconstruction",
                     re_fold=fold_id,
@@ -990,7 +1044,7 @@ def evaluate_wp_d_reconstruction(
                     cycle_id="",
                     granularity="overall",
                     strategy=strategy,
-                    evaluator="ppinn_oracle",
+                    evaluator=evaluator,
                     nsensor=nsensor_val,
                     layout_id=lid,
                     selection_data_domain=sel_domain,
@@ -1042,7 +1096,7 @@ def evaluate_wp_d_reconstruction(
         run_meta = build_run_meta(
             stage="eval_pipeline",
             output_dir=out_dir,
-            seeds={"base": int(model_repeat_id)},
+            seeds={"train_seed": train_seed, "selection_seed": selection_seed},
             train_re=re_split.train_re if re_split is not None else None,
             val_re=re_split.val_re if re_split is not None else re_ids,
             test_re=re_split.test_re if re_split is not None else None,
@@ -1091,6 +1145,7 @@ def evaluate_wp_d_reconstruction(
         "pod_result": pod_res,
         "wall_probe": wall_probe,
         "physics_intrinsic": physics_intrinsic,
+        "physics_closed_input": physics_closed,
         "long_rows": long_rows,
         "n_long_rows": len(long_rows),
         "fingerprints": {
@@ -1435,6 +1490,163 @@ def build_reconstruction_report(
     return report
 
 
+def _require_bound_file(
+    path: Optional[Path], role: str, *, declared_sha: Any = None, require_hash: bool = False,
+) -> Path:
+    if path is None or not path.is_file():
+        raise FileNotFoundError(f"WP-D {role} file not found: {path}")
+    if require_hash and not declared_sha:
+        raise ValueError(f"WP-D {role} requires a frozen SHA-256")
+    if declared_sha and sha256_file(path) != str(declared_sha).lower():
+        raise ValueError(f"WP-D {role} SHA-256 mismatch: {path}")
+    return path
+
+
+def _load_physics_design(
+    path: Path, *, fingerprint: str = "", byte_verified: bool = False,
+) -> Dict[str, Any]:
+    if path.suffix.lower() == ".npz":
+        with np.load(path, allow_pickle=False) as payload:
+            arrays = _physics_design_arrays(payload)
+            embedded = str(payload["fingerprint"].item()) if "fingerprint" in payload else ""
+    else:
+        payload = load_json_manifest(path, require_dict=True)
+        arrays = _physics_design_arrays(payload)
+        embedded = str(payload.get("fingerprint", ""))
+    computed = sha256_json_canonical({key: val.tolist() for key, val in arrays.items()})
+    # Older frozen NPZ files stored only arrays. The approved fingerprint also
+    # includes generation metadata, so equivalence relies on the frozen file hash.
+    legacy_identity = byte_verified and not embedded and path.suffix.lower() == ".npz"
+    if fingerprint and fingerprint != (embedded or computed) and not legacy_identity:
+        raise ValueError(f"WP-D physics design fingerprint mismatch: {path}")
+    return {**arrays, "fingerprint": fingerprint or embedded or computed}
+
+
+def _wp_d_matrix_units(
+    cfg: WPDConfig, manifest: Mapping[str, Any], path: Path, split: ReSplit, *, require_hash: bool,
+) -> List[Dict[str, Any]]:
+    if manifest.get("re_fold_id", split.fold_id) != split.fold_id:
+        raise ValueError(f"WP-D manifest fold does not match {split.fold_id}")
+    recorded_split = manifest.get("re_split", {})
+    if not isinstance(recorded_split, Mapping):
+        raise ValueError("WP-D manifest re_split must be an object")
+    for name in ("train_re", "val_re", "test_re"):
+        if name in recorded_split and set(recorded_split[name]) != set(getattr(split, name)):
+            raise ValueError(f"WP-D manifest {name} does not match the selected fold")
+    rows = manifest.get("evaluation_units")
+    if not isinstance(rows, list) or not rows or not all(isinstance(row, dict) for row in rows):
+        raise ValueError("WP-D manifest requires a non-empty evaluation_units list")
+    if int(manifest.get("expected_unit_count", len(rows))) != len(rows):
+        raise ValueError("WP-D manifest expected_unit_count does not match evaluation_units")
+
+    d1 = cfg.extra.get("d1_reconstruction_matrix", {})
+    d2 = cfg.extra.get("d2_physics_regularization_matrix", {})
+    if not isinstance(d1, Mapping) or not isinstance(d2, Mapping):
+        raise ValueError("WP-D reconstruction and physics matrix configurations must be objects")
+    ex9 = str(d1.get("experiment_id", "EX-9"))
+    ex10 = str(d2.get("experiment_id", "EX-10"))
+    d1_cells: Dict[Tuple[str, int, str, int], Dict[str, Any]] = {}
+    d2_cells: Dict[Tuple[float, int], Dict[str, Any]] = {}
+    layouts: Dict[Tuple[str, int], Tuple[int, ...]] = {}
+    ppinn_cells: Dict[Tuple[float, int], Path] = {}
+    ppinn_paths: Dict[Path, Tuple[float, int]] = {}
+    verified_paths: Dict[Path, str] = {}
+    unit_ids: set[str] = set()
+    units = []
+    for row in rows:
+        uid = str(row.get("unit_id", ""))
+        if not uid or uid in unit_ids:
+            raise ValueError(f"WP-D manifest has a missing or duplicate unit_id {uid!r}")
+        unit_ids.add(uid)
+        validate_no_placeholder_paths(row, strict=True, context=f"WP-D {uid}")
+        unit = dict(row)
+        family = row.get("model_family") or ""
+        strategy = row.get("strategy") or ""
+        if family not in {"", "fixed_mlp", "deepsets_dynamic"}:
+            raise ValueError(f"WP-D {uid}: unsupported model_family {family!r}")
+        indices = tuple(row.get("global_sensor_indices") or ())
+        nsensor = int(row.get("nsensor") or 0)
+        if (any(type(i) is not int or i < 0 for i in indices)
+                or len(set(indices)) != nsensor or len(indices) != nsensor):
+            raise ValueError(f"WP-D {uid}: global_sensor_indices must contain nsensor distinct nonnegative indices")
+        if family and (not indices or not strategy or row.get("layout_id") != layout_id_short(indices)):
+            raise ValueError(f"WP-D {uid}: closed-loop unit requires an explicit matching layout_id and indices")
+        if not family and nsensor:
+            raise ValueError(f"WP-D {uid}: an oracle-only unit cannot have a sensor layout")
+        if family and not str(row.get("pairing_key", "")).strip():
+            raise ValueError(f"WP-D {uid}: closed-loop unit requires an explicit pairing_key")
+        for role in (("ppinn", "encoder") if family else ("ppinn",)):
+            checkpoint = _resolve_optional_path(row.get(f"{role}_checkpoint_path"), base_dir=path.parent)
+            checkpoint = _require_bound_file(checkpoint, f"{uid} {role} checkpoint")
+            if checkpoint not in verified_paths:
+                verified_paths[checkpoint] = sha256_file(checkpoint)
+            wanted = str(row.get(f"{role}_checkpoint_sha256") or "").lower()
+            if (require_hash and not wanted) or (wanted and wanted != verified_paths[checkpoint]):
+                raise ValueError(f"WP-D {uid}: {role} checkpoint SHA-256 missing or mismatched: {checkpoint}")
+            unit[f"{role}_checkpoint_path"] = checkpoint
+
+        experiment_id = str(row.get("experiment_id", ""))
+        historical = row.get("unit_role") == "historical_reference_oracle_only"
+        lam = float(row["lambda_phys"])
+        repeat = int(row.get("ppinn_repeat_id", -1)) if historical else int(row["ppinn_repeat_id"])
+        model_repeat = int(row["model_repeat_id"]) if row.get("model_repeat_id") is not None else (-1 if historical else None)
+        if not np.isfinite(lam) or lam < 0 or (not historical and (repeat < 0 or (model_repeat is not None and model_repeat < 0))):
+            raise ValueError(f"WP-D {uid}: invalid lambda or repeat identity")
+        if experiment_id in {ex9, ex10}:
+            cell = (lam, repeat)
+            checkpoint = unit["ppinn_checkpoint_path"]
+            if ppinn_cells.setdefault(cell, checkpoint) != checkpoint or ppinn_paths.setdefault(checkpoint, cell) != cell:
+                raise ValueError(f"WP-D {uid}: inconsistent pPINN checkpoint binding for cell {cell}")
+        if experiment_id == ex9:
+            key = (strategy, nsensor, family, model_repeat)
+            if model_repeat != repeat or lam != 1.0 or not family or key in d1_cells:
+                raise ValueError(f"WP-D {uid}: invalid or duplicate D.1 paired cell {key}")
+            if layouts.setdefault((strategy, nsensor), indices) != indices:
+                raise ValueError(f"WP-D {uid}: inconsistent frozen layout for {(strategy, nsensor)}")
+            d1_cells[key] = unit
+        if experiment_id == ex10:
+            if cell in d2_cells or (family and model_repeat != repeat):
+                raise ValueError(f"WP-D {uid}: invalid or duplicate D.2 paired cell {cell}")
+            d2_cells[cell] = unit
+        if historical:
+            if family or experiment_id in {ex9, ex10}:
+                raise ValueError(f"WP-D {uid}: historical reference must be oracle only and outside the paired matrices")
+            family = "historical_reference_ppinn_oracle"
+            strategy = "historical_reference"
+        unit.update(model_family=family, strategy=strategy, model_repeat_id=model_repeat,
+                    ppinn_repeat_id=repeat, lambda_phys=lam, global_sensor_indices=indices)
+        units.append(unit)
+
+    if d1:
+        expected_d1 = {
+            (strategy, count, family, int(repeat))
+            for strategy in cfg.strategies for count in cfg.sensor_counts
+            for family in d1.get("model_family", ("fixed_mlp", "deepsets_dynamic"))
+            for repeat in d1.get("model_repeat_id", range(5))
+        }
+        if set(d1_cells) != expected_d1:
+            raise ValueError(f"WP-D D.1 matrix mismatch, missing={sorted(expected_d1 - d1_cells.keys())[:5]}, extra={sorted(d1_cells.keys() - expected_d1)[:5]}")
+    if d2:
+        expected_d2 = {(lam, int(repeat)) for lam in cfg.lambda_phys_values for repeat in d2.get("ppinn_repeat_id", range(5))}
+        if set(d2_cells) != expected_d2:
+            raise ValueError(f"WP-D D.2 matrix mismatch, missing={sorted(expected_d2 - d2_cells.keys())[:5]}, extra={sorted(d2_cells.keys() - expected_d2)[:5]}")
+        anchor = d2.get("closed_loop_anchor_only")
+        if anchor:
+            anchor_panel = (anchor["strategy"], int(anchor["nsensor"]), anchor["model_family"])
+            anchors_by_repeat = {}
+            for (lam, repeat), row in d2_cells.items():
+                panel = (row["strategy"], int(row.get("nsensor") or 0), row["model_family"])
+                if panel != anchor_panel:
+                    raise ValueError(f"WP-D {row['unit_id']}: D.2 closed-loop anchor differs from the protocol")
+                identity = (row["encoder_checkpoint_path"], row["global_sensor_indices"])
+                d1_unit = d1_cells.get((*panel, repeat))
+                if d1_unit is not None and identity != (d1_unit["encoder_checkpoint_path"], d1_unit["global_sensor_indices"]):
+                    raise ValueError(f"WP-D {row['unit_id']}: D.2 anchor differs from its paired D.1 unit")
+                if anchors_by_repeat.setdefault(repeat, identity) != identity:
+                    raise ValueError(f"WP-D {row['unit_id']}: D.2 anchor varies across lambda")
+    return units
+
+
 def _run_preflight_stage(
     cfg: WPDConfig,
     split: ReSplit,
@@ -1453,6 +1665,7 @@ def _run_preflight_stage(
     for label, path in (
         ("protocol", cfg.protocol_path),
         ("comparisons", cfg.comparisons_path),
+        ("artifact_manifest", cfg.artifact_manifest_path),
         ("analysis_lock", cfg.lock_manifest_path),
     ):
         if path is None:
@@ -1544,6 +1757,138 @@ def _run_preflight_stage(
     return report
 
 
+def _load_matrix_spatial_artifacts(
+    cfg: WPDConfig, manifest: Mapping[str, Any], path: Path, *, require_hash: bool,
+) -> Tuple[Optional[Mapping[str, Any]], Optional[MeshLocalSSIMScaleArtifact], Optional[Mapping[str, Any]]]:
+    frozen = manifest.get("frozen_operator_artifacts", {})
+    if not isinstance(frozen, Mapping):
+        raise ValueError("WP-D frozen_operator_artifacts must be an object")
+    physics_path = cfg.physics_design_path or _resolve_optional_path(frozen.get("physics_design_path"), base_dir=path.parent)
+    scale_path = cfg.ssim_scale_path or _resolve_optional_path(
+        frozen.get("ssim_scale_path", frozen.get("ssim_scale_artifact_path")), base_dir=path.parent,
+    )
+    operator_path = _resolve_optional_path(frozen.get("wake_operator_audit_path"), base_dir=path.parent)
+    physics = scale = operator_audit = None
+    if physics_path is not None or cfg.extra.get("d2_physics_regularization_matrix"):
+        declared = frozen.get("physics_design_sha256")
+        physics_path = _require_bound_file(physics_path, "physics design", declared_sha=declared, require_hash=require_hash)
+        physics = _load_physics_design(physics_path, fingerprint=str(frozen.get("physics_design_fingerprint", "")), byte_verified=bool(declared))
+    if cfg.enable_ssim and (scale_path is not None or not (manifest.get("example_not_formal") or cfg.smoke_not_for_formal)):
+        declared = frozen.get("ssim_scale_sha256", frozen.get("ssim_scale_artifact_sha256"))
+        scale_path = _require_bound_file(scale_path, "SSIM scale", declared_sha=declared, require_hash=require_hash)
+        scale = MeshLocalSSIMScaleArtifact.load_json(scale_path)
+        if frozen.get("ssim_scale_fingerprint", scale.fingerprint) != scale.fingerprint:
+            raise ValueError(f"WP-D SSIM scale fingerprint mismatch: {scale_path}")
+    if cfg.enable_vorticity and (operator_path is not None or require_hash):
+        operator_path = _require_bound_file(operator_path, "wake operator audit", declared_sha=frozen.get("wake_operator_audit_sha256"), require_hash=require_hash)
+        operator_audit = load_json_manifest(operator_path, require_dict=True)
+    return physics, scale, operator_audit
+
+
+def _build_manifest_wake_operator(mesh: MeshData, audit: Mapping[str, Any]) -> UnstructuredDerivativeOperator:
+    center = mesh.cylinder_center or (0.0, 0.0)
+    radius = mesh.cylinder_radius or mesh.cylinder_diameter / 2.0
+    selected = fluid_domain_mask(mesh.roi_xy, center, radius) & wake_mask(mesh.roi_xy_nd)
+    operator = UnstructuredDerivativeOperator(
+        mesh.roi_xy[selected], k=int(audit["k"]), ridge=float(audit["ridge"]), eps=float(audit["eps"]),
+    )
+    if operator.coordinate_hash != audit["coordinate_hash"] or operator.n_fluid != int(audit["n_fluid"]):
+        raise ValueError("WP-D wake operator geometry does not match the frozen operator audit")
+    if (operator.n_retained, operator.n_invalid) != (int(audit["n_retained"]), int(audit["n_invalid"])):
+        raise ValueError("WP-D wake operator retained stencils do not match the frozen operator audit")
+    # Historical hashes also included the draft-status flag and condition-number
+    # roundoff. Publish the actual migrated operator fingerprint in the long table.
+    return operator
+
+
+def _evaluate_manifest_matrix(
+    cfg: WPDConfig,
+    units: Sequence[Mapping[str, Any]],
+    mesh: MeshData,
+    split: ReSplit,
+    cases: Union[Sequence[ReCaseData], Mapping[int, ReCaseData]],
+    *,
+    allow_test: bool,
+    eval_out_dir: Path,
+    pod_model: Optional[SurfacePOD],
+    common: Dict[str, Any],
+) -> Dict[str, Any]:
+    rows: List[Dict[str, Any]] = []
+    ppinn_cache: Dict[Path, LegacyPPINNPackage] = {}
+    case_list = list(cases.values()) if isinstance(cases, Mapping) else list(cases)
+    re_ids = [int(round(float(case.re))) for case in case_list]
+    dynamic_positions = positions_from_theta(mesh.sensor_theta)
+    fingerprints = None
+    for unit in units:
+        indices = unit["global_sensor_indices"]
+        if indices and max(indices) >= mesh.ncand:
+            raise ValueError(f"WP-D {unit['unit_id']}: sensor index exceeds mesh candidate count")
+        ppinn_path = unit["ppinn_checkpoint_path"]
+        if ppinn_path not in ppinn_cache:
+            ppinn_cache[ppinn_path] = load_legacy_ppinn_checkpoint(ppinn_path, map_location=cfg.device)
+        encoder_path = unit.get("encoder_checkpoint_path")
+        family = unit["model_family"]
+        encoder = None
+        if family == "fixed_mlp":
+            encoder = load_legacy_mlp_checkpoint(encoder_path, map_location=cfg.device)
+        elif family == "deepsets_dynamic":
+            try:
+                encoder = load_deepsets_checkpoint(encoder_path, map_location=cfg.device, candidate_theta=mesh.sensor_theta)
+            except ValueError:
+                encoder = load_ablation_checkpoint(encoder_path, map_location=cfg.device, candidate_theta=mesh.sensor_theta)
+            if not np.array_equal(np.round(encoder.candidate_positions, 12), np.round(dynamic_positions, 12)):
+                raise ValueError(f"WP-D {unit['unit_id']}: encoder candidate positions do not match the mesh")
+
+        result = evaluate_wp_d_reconstruction(
+            ppinn=ppinn_cache[ppinn_path], cases=cases, mesh=mesh,
+            encoder=encoder, pod_model=pod_model if unit.get("include_pod") else None,
+            sensor_indices=indices or None,
+            unit_id=unit["unit_id"], experiment_id=str(unit.get("experiment_id", "")),
+            model_family=family, strategy=unit["strategy"],
+            model_repeat_id=unit["model_repeat_id"], ppinn_repeat_id=unit["ppinn_repeat_id"],
+            lambda_phys=unit["lambda_phys"], pairing_key=unit.get("pairing_key"),
+            train_seed=unit.get("train_seed", unit.get("ppinn_seed")), selection_seed=unit.get("selection_seed"),
+            layout_repeat_id=int(unit.get("layout_repeat_id") or 0), train_repeat_id=unit.get("train_repeat_id"),
+            checkpoint_ppinn=str(ppinn_path), checkpoint_encoder=str(encoder_path or ""),
+            checkpoint_pod=str(cfg.pod_checkpoint or "") if unit.get("include_pod") else "",
+            smoke_not_for_formal=cfg.smoke_not_for_formal or bool(unit.get("smoke_not_for_formal")),
+            **(dict(common, physics_design=None) if family == "historical_reference_ppinn_oracle" else common),
+        )
+        rows.extend(result["long_rows"])
+        if fingerprints is None or family != "historical_reference_ppinn_oracle":
+            fingerprints = result["fingerprints"]
+
+    eval_out_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = write_metrics_long(rows, eval_out_dir / "wp_d_metrics_long.csv", extra_fields=WP_D_LONG_EXTRA_FIELDS)
+    is_smoke = cfg.smoke_not_for_formal or all(unit.get("smoke_not_for_formal") for unit in units)
+    split_label = "test" if allow_test else "val"
+    summary = {
+        "schema_version": "wp_d_reconstruction_summary_v1", "split": split_label,
+        "loaded_re_ids": re_ids, "locked_test_opened": allow_test, "prior_test_reuse": allow_test,
+        "n_units_expected": len(units), "n_units_complete": len(units), "missing_unit_ids": [],
+        "unit_ids": [unit["unit_id"] for unit in units], "smoke_not_for_formal": is_smoke,
+        "artifact_hashes": {"protocol": common["protocol_hash"], "comparisons": common["comparisons_hash"],
+                            "manifest": common["manifest_hash"], "analysis_lock": common["analysis_lock_sha256"]},
+        "fingerprints": fingerprints,
+    }
+    summary_path = eval_out_dir / "wp_d_reconstruction_summary.json"
+    atomic_write_json(summary, summary_path)
+    run_meta = build_run_meta(
+        stage="eval_pipeline", output_dir=eval_out_dir,
+        seeds={key: sorted({int(unit[key]) for unit in units if unit.get(key) is not None})
+               for key in ("train_seed", "selection_seed", "ppinn_seed")},
+        train_re=split.train_re, val_re=split.val_re, test_re=split.test_re,
+        re_fold_id=split.fold_id, strict_split=True, selection_data_domain="val_re_only",
+        extra={"wp": "wp_d", "mode": "formal-reused-test" if allow_test else "validation-only",
+               "smoke_not_for_formal": is_smoke, "loaded_re_ids": re_ids,
+               "locked_test_opened": allow_test, "prior_test_reuse": allow_test,
+               **{f"{name}_sha256": value for name, value in summary["artifact_hashes"].items()}},
+    )
+    meta_path = write_run_meta(run_meta, eval_out_dir)
+    return {"status": "ok", "n_long_rows": len(rows), **summary,
+            "outputs": {"metrics_long_csv": str(metrics_path), "summary_json": str(summary_path), "run_meta_json": str(meta_path)}}
+
+
 def _run_evaluate_stage(
     cfg: WPDConfig,
     split: ReSplit,
@@ -1553,14 +1898,14 @@ def _run_evaluate_stage(
     lock_manifest: Optional[Mapping[str, Any]],
     allow_example_lock: bool,
 ) -> Dict[str, Any]:
-    eval_re_ids = [
-        int(r)
-        for r in (
-            ctx.get("eval_re_ids")
-            if ctx.get("eval_re_ids") is not None
-            else (split.test_re if allow_test else split.val_re)
-        )
-    ]
+    allowed_re = split.test_re if allow_test else split.val_re
+    cases = ctx.get("cases")
+    if cases is not None:
+        case_values = cases.values() if isinstance(cases, Mapping) else cases
+        provided_re = [int(round(float(case.re))) for case in case_values]
+    else:
+        provided_re = list(allowed_re)
+    eval_re_ids = [int(r) for r in (ctx["eval_re_ids"] if ctx.get("eval_re_ids") is not None else provided_re)]
     validate_re_split_locked_test_gate(
         eval_re_ids,
         re_split=split,
@@ -1570,15 +1915,68 @@ def _run_evaluate_stage(
         allow_example=allow_example_lock,
     )
     enforce_locked_test_re_guard(eval_re_ids, allow_test=allow_test, re_split=split)
+    if not eval_re_ids or len(set(eval_re_ids)) != len(eval_re_ids) or not set(eval_re_ids) <= set(allowed_re):
+        raise ValueError(f"WP-D evaluation Reynolds numbers must be distinct members of the selected split: {allowed_re}")
+    if cases is not None and sorted(provided_re) != sorted(eval_re_ids):
+        raise ValueError("WP-D supplied cases must match requested Reynolds numbers")
+
+    formal = bool(ctx.get("formal") or allow_test)
+    proto_hash = sha256_file(cfg.protocol_path) if cfg.protocol_path and cfg.protocol_path.is_file() else sha256_json_canonical(cfg.extra)
+    comp_hash = sha256_file(cfg.comparisons_path) if cfg.comparisons_path and cfg.comparisons_path.is_file() else ""
+    lock_sha = sha256_file(cfg.lock_manifest_path) if cfg.lock_manifest_path and cfg.lock_manifest_path.is_file() else ""
+    manifest = units = manifest_hash = operator_audit = None
+    physics = ctx.get("physics_design")
+    ssim_art = ctx.get("ssim_scale_artifact")
+    if cfg.artifact_manifest_path is None:
+        if formal or any(cfg.extra.get(key) for key in ("d1_reconstruction_matrix", "d2_physics_regularization_matrix")):
+            raise ValueError("WP-D requires paths.artifact_manifest_path for matrix evaluation")
+        if cfg.physics_design_path is not None:
+            physics = _load_physics_design(_require_bound_file(cfg.physics_design_path, "physics design"))
+        if cfg.enable_ssim and cfg.ssim_scale_path is not None:
+            ssim_art = MeshLocalSSIMScaleArtifact.load_json(_require_bound_file(cfg.ssim_scale_path, "SSIM scale"))
+    else:
+        if any(ctx.get(key) is not None for key in ("ppinn", "encoder", "sensor_indices", "x_normalizer", "re_normalizer", "physics_design", "ssim_scale_artifact")):
+            raise ValueError("WP-D manifest evaluation requires its own checkpoint, layout and spatial artifacts")
+        if not cfg.complete_only:
+            raise ValueError("WP-D matrix evaluation requires complete shedding cycles")
+        manifest_path = _require_bound_file(cfg.artifact_manifest_path, "artifact manifest")
+        manifest = load_json_manifest(manifest_path, require_dict=True)
+        manifest_hash = sha256_file(manifest_path)
+        if formal:
+            for role, path in (("protocol", cfg.protocol_path), ("comparisons", cfg.comparisons_path), ("artifact manifest", manifest_path)):
+                artifact_path = _require_bound_file(path, role)
+                require_approved_status(load_json_manifest(artifact_path, require_dict=True), context=f"WP-D {role}")
+            if cfg.smoke_not_for_formal or any(unit.get("smoke_not_for_formal") for unit in manifest.get("evaluation_units", [])):
+                raise ValueError("WP-D smoke units cannot enter formal evaluation")
+        if allow_test:
+            lock = lock_manifest or {}
+            authorization = lock.get("owner_authorizations", {})
+            if lock.get("prior_test_reuse") is not True or authorization.get("open_reused_test") is not True:
+                raise PermissionError("WP-D test reuse requires explicit owner_authorizations.open_reused_test=true")
+            for role, actual in (("protocol", proto_hash), ("comparisons", comp_hash), ("artifact_manifest", manifest_hash)):
+                if not actual or lock.get("frozen_artifacts", {}).get(f"{role}_sha256") != actual:
+                    raise PermissionError(f"WP-D analysis lock must bind the evaluated {role}")
+        units = _wp_d_matrix_units(cfg, manifest, manifest_path, split, require_hash=formal)
+        physics, ssim_art, operator_audit = _load_matrix_spatial_artifacts(cfg, manifest, manifest_path, require_hash=formal)
+        if physics is not None and not set(physics["re"]).issubset(split.val_re):
+            raise ValueError("WP-D frozen physics design must use only the selected validation Reynolds numbers")
+        if ssim_art is not None and (ssim_art.source_split != "train_val_only" or not set(ssim_art.re_ids) <= set(split.train_re + split.val_re)):
+            raise ValueError("WP-D frozen SSIM scale must be derived from training and validation Reynolds numbers")
 
     mesh = ctx.get("mesh")
     if mesh is None:
         mesh_path = cfg.data_dir / cfg.mesh_file
-        if not mesh_path.is_file():
-            raise FileNotFoundError(f"Mesh file required for evaluate stage: {mesh_path}")
+        mesh_hash = manifest.get("data_binding", {}).get("mesh_h5_sha256") if manifest else None
+        _require_bound_file(mesh_path, "mesh", declared_sha=mesh_hash)
         mesh = load_mesh(mesh_path)
+    if manifest:
+        binding = manifest.get("data_binding", {})
+        if int(binding.get("candidate_count", mesh.ncand)) != mesh.ncand:
+            raise ValueError("WP-D mesh candidate count does not match the artifact manifest")
+        if binding.get("candidate_fingerprint") and binding["candidate_fingerprint"] != fingerprint_xy(positions_from_theta(mesh.sensor_theta)):
+            raise ValueError("WP-D mesh candidate fingerprint does not match the artifact manifest")
+    derivative_operator = _build_manifest_wake_operator(mesh, operator_audit) if operator_audit is not None else None
 
-    cases = ctx.get("cases")
     if cases is None:
         cases = load_re_cases(
             cfg.data_dir,
@@ -1588,72 +1986,44 @@ def _run_evaluate_stage(
             test_guard_split=None if allow_test else split,
         )
 
-    ppinn = ctx.get("ppinn")
-    if ppinn is None:
-        if cfg.ppinn_checkpoint is None or not cfg.ppinn_checkpoint.is_file():
-            raise FileNotFoundError(f"pPINN checkpoint not found for evaluate stage: {cfg.ppinn_checkpoint}")
-        ppinn = load_legacy_ppinn_checkpoint(cfg.ppinn_checkpoint, map_location=cfg.device)
-
-    encoder = ctx.get("encoder")
-    if encoder is None and cfg.encoder_checkpoint is not None and cfg.encoder_checkpoint.is_file():
-        encoder = _load_encoder_package(cfg.encoder_checkpoint, cfg.device)
-
     pod_model = ctx.get("pod_model")
-    if pod_model is None and cfg.pod_checkpoint is not None and cfg.pod_checkpoint.is_file():
-        pod_model = SurfacePOD.load(cfg.pod_checkpoint)
-
-    ssim_art = ctx.get("ssim_scale_artifact")
-    if ssim_art is None and cfg.ssim_scale_path is not None and cfg.ssim_scale_path.is_file():
-        ssim_art = MeshLocalSSIMScaleArtifact.load_json(cfg.ssim_scale_path)
+    pod_required = any(unit.get("include_pod") for unit in units) if units is not None else cfg.pod_checkpoint is not None
+    if pod_required and pod_model is None:
+        pod_model = SurfacePOD.load(_require_bound_file(cfg.pod_checkpoint, "POD checkpoint"))
 
     eval_out_dir = Path(ctx.get("eval_output_dir") or (cfg.output_root / "evaluate"))
-    proto_hash = (
-        sha256_file(cfg.protocol_path)
-        if cfg.protocol_path is not None and cfg.protocol_path.is_file()
-        else None
+    common = dict(
+        allow_test=allow_test, re_split=split, lock_manifest=lock_manifest, lock_path=cfg.lock_manifest_path,
+        allow_example_lock=allow_example_lock, chunk_size=cfg.eval_chunk_size, device=cfg.device,
+        complete_only=cfg.complete_only, enable_vorticity=cfg.enable_vorticity, enable_ssim=cfg.enable_ssim,
+        ssim_scale_artifact=ssim_art, ssim_max_snapshots=cfg.ssim_max_snapshots,
+        physics_design=physics, derivative_operator=derivative_operator,
+        protocol_id=str(cfg.extra.get("protocol_id", "")), protocol_hash=proto_hash,
+        comparisons_hash=comp_hash, analysis_lock_sha256=lock_sha, manifest_hash=manifest_hash,
     )
-    comp_hash = (
-        sha256_file(cfg.comparisons_path)
-        if cfg.comparisons_path is not None and cfg.comparisons_path.is_file()
-        else ""
-    )
-    lock_sha = (
-        sha256_file(cfg.lock_manifest_path)
-        if cfg.lock_manifest_path is not None and cfg.lock_manifest_path.is_file()
-        else ""
-    )
-
-    res = evaluate_wp_d_reconstruction(
-        ppinn=ppinn,
-        cases=cases,
-        mesh=mesh,
-        encoder=encoder,
-        pod_model=pod_model,
-        sensor_indices=ctx.get("sensor_indices"),
-        x_normalizer=ctx.get("x_normalizer"),
-        re_normalizer=ctx.get("re_normalizer"),
-        allow_test=allow_test,
-        re_split=split,
-        lock_manifest=lock_manifest,
-        lock_path=cfg.lock_manifest_path,
-        allow_example_lock=allow_example_lock,
-        output_dir=eval_out_dir,
-        chunk_size=cfg.eval_chunk_size,
-        device=cfg.device,
-        complete_only=cfg.complete_only,
-        enable_vorticity=cfg.enable_vorticity,
-        enable_ssim=cfg.enable_ssim,
-        ssim_scale_artifact=ssim_art,
-        ssim_max_snapshots=cfg.ssim_max_snapshots,
-        physics_design=ctx.get("physics_design"),
-        checkpoint_ppinn=str(cfg.ppinn_checkpoint or ""),
-        checkpoint_encoder=str(cfg.encoder_checkpoint or ""),
-        checkpoint_pod=str(cfg.pod_checkpoint or ""),
-        smoke_not_for_formal=cfg.smoke_not_for_formal,
-        protocol_hash=proto_hash,
-        comparisons_hash=comp_hash,
-        analysis_lock_sha256=lock_sha,
-    )
+    if units is not None:
+        eval_out_dir /= "test" if allow_test else "val"
+        res = _evaluate_manifest_matrix(cfg, units, mesh, split, cases, allow_test=allow_test,
+                                        eval_out_dir=eval_out_dir, pod_model=pod_model, common=common)
+    else:
+        ppinn = ctx.get("ppinn")
+        if ppinn is None:
+            ckpt = _require_bound_file(cfg.ppinn_checkpoint, "pPINN checkpoint")
+            ppinn = load_legacy_ppinn_checkpoint(ckpt, map_location=cfg.device)
+        encoder = ctx.get("encoder")
+        if encoder is None and cfg.encoder_checkpoint is not None:
+            encoder = _load_encoder_package(_require_bound_file(cfg.encoder_checkpoint, "encoder checkpoint"), cfg.device)
+        dynamic = isinstance(encoder, (DeepSetsPackage, AblationPackage)) or is_dynamic_token_regressor(encoder)
+        res = evaluate_wp_d_reconstruction(
+            ppinn=ppinn, cases=cases, mesh=mesh, encoder=encoder, pod_model=pod_model,
+            sensor_indices=ctx.get("sensor_indices"), x_normalizer=ctx.get("x_normalizer"), re_normalizer=ctx.get("re_normalizer"),
+            output_dir=eval_out_dir, checkpoint_ppinn=str(cfg.ppinn_checkpoint or ""),
+            checkpoint_encoder=str(cfg.encoder_checkpoint or ""), checkpoint_pod=str(cfg.pod_checkpoint or ""),
+            smoke_not_for_formal=cfg.smoke_not_for_formal,
+            model_family="deepsets_dynamic" if dynamic else "fixed_mlp" if encoder is not None else "",
+            strategy=str(getattr(encoder, "strategy", "") or ""),
+            **common,
+        )
     ctx["eval_output_dir"] = eval_out_dir
     ctx["metrics_long_path"] = Path(res["outputs"]["metrics_long_csv"])
     return res
@@ -1665,7 +2035,10 @@ def _run_aggregate_stage(cfg: WPDConfig, ctx: Dict[str, Any]) -> Dict[str, Any]:
     input_roots = list(ctx.get("aggregate_roots") or [cfg.output_root])
     strict = bool(ctx.get("strict_aggregate", False))
     allow_smoke = bool(ctx.get("allow_smoke", True))
-    rows, audit = aggregate_wp_d_results(input_roots, strict=strict, allow_smoke=allow_smoke)
+    rows, audit = aggregate_wp_d_results(
+        input_roots, strict=strict, allow_smoke=allow_smoke,
+        expected_manifest_path=cfg.artifact_manifest_path,
+    )
     csv_path = write_results_long(rows, agg_dir / "results_long.csv", profile="wp_d")
     audit_path = write_audit(audit, agg_dir / "aggregation_audit.json")
     ctx["results_csv"] = csv_path

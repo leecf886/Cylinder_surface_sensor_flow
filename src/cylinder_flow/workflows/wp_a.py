@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
+from hashlib import sha256
 import json
 import math
 import os
@@ -50,10 +51,13 @@ from cylinder_flow.artifacts.checkpoints import (
     load_deepsets_checkpoint,
     load_legacy_mlp_checkpoint,
     load_legacy_ppinn_checkpoint,
+    save_mlp_checkpoint,
 )
 from cylinder_flow.config import get_path_config
 from cylinder_flow.data.h5 import load_mesh, load_re_cases
+from cylinder_flow.data.sampling import SensorDataset, create_sensor_data_loader
 from cylinder_flow.data.splits import ReSplit
+from cylinder_flow.data.types import MeshData
 from cylinder_flow.evaluation.runner import (
     enforce_locked_test_re_guard,
     evaluate_cases_to_long_rows,
@@ -61,11 +65,26 @@ from cylinder_flow.evaluation.runner import (
     evaluate_pod_baseline,
     evaluate_ppinn_oracle,
 )
-from cylinder_flow.layouts.basic import (
+from cylinder_flow.layouts import (
+    build_linreg_workspace,
+    build_sensor_split_from_cases,
     physics_layout,
+    run_amortized_chain_search,
     sample_random_layouts,
+    select_d_optimal_greedy_order,
+    select_linreg_greedy_order,
+    select_pod_greedy_order,
+    select_qr_pod_order,
     uniform_layout,
+    validate_ppinn_for_layout_search,
 )
+from cylinder_flow.models.deepsets import (
+    candidate_position_fingerprint,
+    positions_from_theta,
+    validate_sensor_indices,
+)
+from cylinder_flow.models.pod import load_pod_checkpoint
+from cylinder_flow.training.encoder import EncoderTrainingConfig, train_sensor_mlp
 
 WP_A_STAGES: Tuple[str, ...] = (
     "preflight",
@@ -91,6 +110,9 @@ DEFAULT_STRATEGIES: Tuple[str, ...] = (
     "random",
 )
 DEFAULT_SENSOR_COUNTS: Tuple[int, ...] = (6, 12, 24, 48)
+_GEOMETRY_LAYOUTS = {"uniform": uniform_layout, "physics": physics_layout}
+_TRAIN_LAYOUTS = {"qr_pod", "linreg_greedy", "pod_greedy"}
+_VALIDATION_LAYOUTS = {"greedy", "linreg_greedy", "amortized_chain_greedy", "pod_greedy"}
 
 
 @dataclass
@@ -124,6 +146,8 @@ class WPAConfig:
     smoke_not_for_formal: bool = False
     default_stages: Tuple[str, ...] = DEFAULT_WP_A_STAGES
     extra: Dict[str, Any] = field(default_factory=dict)
+    protocol_path: Optional[Path] = None
+    final_encoder: str = "mlp"
 
     def __post_init__(self) -> None:
         self.data_dir = Path(self.data_dir)
@@ -137,8 +161,13 @@ class WPAConfig:
             raise ValueError("random_train_repeats must be positive")
         if self.num_epochs <= 0:
             raise ValueError("num_epochs must be positive")
+        if self.final_encoder not in {"mlp", "shared"}:
+            raise ValueError("WP-A final_encoder must be 'mlp' or 'shared'")
         if not self.sensor_counts:
             raise ValueError("sensor_counts must be non-empty")
+        unknown = sorted(set(self.strategies) - set(DEFAULT_STRATEGIES))
+        if unknown:
+            raise ValueError(f"Unsupported WP-A layout strategies: {unknown}")
 
 
 def _resolve_optional_path(
@@ -255,6 +284,7 @@ def load_wp_a_config(
         folds_config_path=_resolve_optional_path(
             payload.get("folds_config_path"), base_dir=base_dir
         ),
+        protocol_path=config_file_path,
         mesh_file=str(dataset_block.get("mesh_file", payload.get("mesh_file", "mesh.h5"))),
         ppinn_policy=str(payload.get("ppinn_policy", SCHEME_A_POLICY)),
         ppinn_selection_metric=str(
@@ -298,6 +328,7 @@ def load_wp_a_config(
         ),
         base_seed=int(layout_block.get("base_seed", payload.get("base_seed", 42))),
         num_epochs=int(layout_block.get("num_epochs", payload.get("num_epochs", 200))),
+        final_encoder=str(layout_block.get("final_encoder", payload.get("final_encoder", "mlp"))),
         device=str(payload.get("device", "cpu")),
         eval_chunk_size=int(payload.get("eval_chunk_size", 16384)),
         n_bootstrap=int(stats_block.get("n_bootstrap", payload.get("n_bootstrap", 5000))),
@@ -394,12 +425,14 @@ def select_ppinn_by_validation(
 
     for ckpt_path in candidates:
         pkg = load_legacy_ppinn_checkpoint(ckpt_path, map_location=device)
+        validate_ppinn_for_layout_search(pkg, re_split=split, expected_D=mesh.cylinder_diameter)
         eval_res = evaluate_ppinn_oracle(
             pkg,
             val_cases,
             mesh,
             allow_test=False,
             re_split=split,
+            complete_only=True,
             chunk_size=chunk_size,
             device=device,
         )
@@ -551,16 +584,6 @@ def _load_encoder_package(ckpt_path: Path, device: str) -> Any:
             return load_ablation_checkpoint(ckpt_path, map_location=device)
 
 
-def _deterministic_layout_indices(
-    strategy: str,
-    nsensor: int,
-    theta: np.ndarray,
-) -> List[int]:
-    if strategy == "physics":
-        return list(physics_layout(theta, nsensor))
-    return list(uniform_layout(theta, nsensor))
-
-
 def _run_preflight_stage(
     cfg: WPAConfig,
     split: ReSplit,
@@ -654,18 +677,175 @@ def _run_preflight_stage(
     return report
 
 
+def _search_layout_orders(
+    cfg: WPAConfig,
+    split: ReSplit,
+    ctx: Mapping[str, Any],
+    mesh: MeshData,
+) -> Tuple[Dict[str, List[int]], Dict[str, Any]]:
+    """Run each requested search once up to the largest requested sensor count."""
+    strategies = set(cfg.strategies)
+    if not strategies & (_TRAIN_LAYOUTS | _VALIDATION_LAYOUTS):
+        return {}, {}
+    validate_ids = (split.train_re if strategies & _TRAIN_LAYOUTS else []) + (
+        split.val_re if strategies & _VALIDATION_LAYOUTS else []
+    )
+    enforce_locked_test_re_guard(validate_ids, allow_test=False, re_split=split)
+    candidate_count = mesh.ncand
+    max_count = max(cfg.sensor_counts)
+    options = cfg.extra.get("layout_protocol", {})
+    if not isinstance(options, Mapping):
+        options = {}
+
+    train_cases = []
+    if strategies & _TRAIN_LAYOUTS:
+        train_cases = list(load_re_cases(
+            cfg.data_dir, split.train_re, mesh=mesh,
+            load_field="pod_greedy" in strategies, test_guard_split=split,
+        ).values())
+    val_cases = []
+    if strategies & _VALIDATION_LAYOUTS:
+        val_cases = list(load_re_cases(
+            cfg.data_dir, split.val_re, mesh=mesh,
+            load_field=bool(strategies & {"amortized_chain_greedy", "pod_greedy"}),
+            test_guard_split=split,
+        ).values())
+    train_full = (
+        build_sensor_split_from_cases(train_cases, re_split=split, expected_partition="train")
+        if strategies & {"qr_pod", "linreg_greedy"}
+        else None
+    )
+    val_full = (
+        build_sensor_split_from_cases(val_cases, re_split=split, expected_partition="val")
+        if strategies & {"greedy", "linreg_greedy", "amortized_chain_greedy"}
+        else None
+    )
+
+    orders: Dict[str, List[int]] = {}
+    evidence: Dict[str, Any] = {}
+    if "greedy" in strategies:
+        order, steps, _ = select_d_optimal_greedy_order(
+            val_full, candidate_count, max_count,
+            ridge=float(options.get("fim_ridge", 1e-6)),
+            standardize=bool(options.get("fim_standardize", True)),
+            re_split=split,
+        )
+        orders["greedy"], evidence["greedy"] = order, {"steps": steps}
+    if "qr_pod" in strategies:
+        assert train_full is not None
+        qr = select_qr_pod_order(
+            train_full, candidate_count, max_count,
+            channel_mode=str(options.get("qr_channel_mode", "grouped_uvp")),
+            rank=int(options.get("qr_rank", 0)),
+            energy_threshold=float(options.get("qr_energy_threshold", 0.999)),
+            standardize=bool(options.get("qr_standardize", True)),
+            oversampling_ridge=float(options.get("qr_oversampling_ridge", 1e-9)),
+            re_split=split,
+        )
+        orders["qr_pod"], evidence["qr_pod"] = list(qr["pivot_order"]), qr
+    if "linreg_greedy" in strategies:
+        assert train_full is not None and val_full is not None
+        workspace = build_linreg_workspace(
+            train_full, val_full, candidate_count,
+            standardize=bool(options.get("linreg_standardize", True)), re_split=split,
+        )
+        order, steps, _ = select_linreg_greedy_order(
+            workspace, max_count,
+            ridge=float(options.get("linreg_ridge", 1e-6)),
+            selection_metric=str(options.get("linreg_selection_metric", "phase_crmse")),
+            re_weight=float(options.get("linreg_re_weight", 1.0)),
+            phase_weight=float(options.get("linreg_phase_weight", 1.0)),
+        )
+        orders["linreg_greedy"], evidence["linreg_greedy"] = order, {"steps": steps}
+    if "amortized_chain_greedy" in strategies:
+        encoder_path = ctx.get("encoder_checkpoint")
+        ppinn_path = ctx.get("ppinn_checkpoint")
+        if encoder_path is None or not Path(encoder_path).is_file():
+            raise FileNotFoundError("amortized_chain_greedy requires a shared dynamic encoder checkpoint")
+        if ppinn_path is None or not Path(ppinn_path).is_file():
+            raise FileNotFoundError("amortized_chain_greedy requires a selected pPINN checkpoint")
+        encoder = load_deepsets_checkpoint(encoder_path, map_location=cfg.device)
+        pool_fingerprint = candidate_position_fingerprint(positions_from_theta(mesh.sensor_theta))
+        if encoder.candidate_position_fingerprint != pool_fingerprint:
+            raise ValueError("Shared encoder candidate positions do not match the WP-A deployment mesh")
+        ppinn = load_legacy_ppinn_checkpoint(ppinn_path, map_location=cfg.device)
+        validate_ppinn_for_layout_search(ppinn, re_split=split, expected_D=mesh.cylinder_diameter)
+        search = run_amortized_chain_search(
+            encoder, ppinn, val_full, val_cases, mesh,
+            max_count=max_count,
+            proxy_metric=str(options.get("chain_proxy_metric", "sensitivity_weighted_rephase")),
+            exact_metric=str(options.get("chain_greedy_metric", PRIMARY_METRIC)),
+            exact_top_k=int(options.get("chain_exact_top_k", 5)),
+            snapshot_budget=int(options.get("chain_val_snapshot_budget", 1024)),
+            snapshot_seed=int(options.get("chain_val_snapshot_seed", 0)),
+            field_point_budget=int(options.get("chain_search_field_points", 1024)),
+            field_point_seed=int(options.get("chain_search_field_seed", 0)),
+            candidate_batch_size=int(options.get("chain_candidate_batch_size", 0)),
+            candidate_chunk_size=int(options.get("chain_candidate_chunk_size", 8192)),
+            eval_chunk_size=cfg.eval_chunk_size,
+            device=cfg.device,
+            smoke_not_for_formal=cfg.smoke_not_for_formal,
+            strict=not cfg.smoke_not_for_formal,
+            re_split=split,
+        )
+        orders["amortized_chain_greedy"] = list(search["selection_order"])
+        evidence["amortized_chain_greedy"] = {
+            key: search[key] for key in (
+                "chain_proxy_metric", "chain_greedy_metric", "chain_exact_top_k",
+                "ppinn_checkpoint_contract", "sparse_sampling", "sparse_sampling_fingerprint", "greedy_steps",
+            )
+        } | {"encoder_checkpoint_sha256": sha256_file(encoder_path),
+             "ppinn_checkpoint_sha256": sha256_file(ppinn_path)}
+    if "pod_greedy" in strategies:
+        pod_path = ctx.get("pod_checkpoint")
+        pod = ctx.get("pod_model")
+        if pod is None:
+            if pod_path is None or not Path(pod_path).is_file():
+                raise FileNotFoundError("pod_greedy requires a fitted POD checkpoint")
+            pod = load_pod_checkpoint(pod_path)
+        ridge = float(options.get("pod_greedy_ridge_lambda", -1.0))
+        if ridge == -1.0:
+            ridge = float(pod.metadata.get("ridge_lambda", 1e-6))
+        order, steps, _ = select_pod_greedy_order(
+            pod, train_cases, val_cases, candidate_count, max_count,
+            metric=str(options.get("pod_greedy_metric", PRIMARY_METRIC)),
+            ridge_lambda=ridge,
+            x_norm_method=str(options.get("pod_greedy_x_norm_method", "checkpoint")),
+            rho=float(pod.metadata.get("rho", 1000.0)),
+            pressure_scale_mode=str(pod.metadata.get("pressure_scale_mode", "rho_uinf2")),
+            re_split=split,
+        )
+        orders["pod_greedy"] = order
+        evidence["pod_greedy"] = {"steps": steps}
+        if ctx.get("pod_model") is None:
+            evidence["pod_greedy"]["pod_checkpoint_sha256"] = sha256_file(pod_path)
+    return orders, evidence
+
+
 def _run_layout_search_stage(
     cfg: WPAConfig,
     split: ReSplit,
     ctx: Mapping[str, Any],
 ) -> Dict[str, Any]:
     out_dir = cfg.output_root / f"fold_{split.fold_id}" / "layout_search"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     mesh = load_mesh(cfg.data_dir / cfg.mesh_file)
     theta = np.asarray(mesh.sensor_theta, dtype=np.float64)
+    if any(ns < 1 or ns > mesh.ncand for ns in cfg.sensor_counts):
+        raise ValueError(f"WP-A sensor_counts must be in [1, {mesh.ncand}]")
+    orders, evidence = _search_layout_orders(cfg, split, ctx, mesh)
+    pool_fingerprint = candidate_position_fingerprint(positions_from_theta(theta))
     sel_seed = random_layout_selection_seed(cfg.base_seed)
     sel_domain = f"val_re={split.val_re}"
+    strategy_domains = {
+        "uniform": "geometry_only",
+        "physics": "geometry_only",
+        "random": "random_candidate_pool_only",
+        "greedy": sel_domain,
+        "qr_pod": f"train_fit_re={split.train_re}",
+        "linreg_greedy": f"train_fit_re={split.train_re};val_select_re={split.val_re}",
+        "amortized_chain_greedy": sel_domain,
+        "pod_greedy": f"train_refit_re={split.train_re};val_select_re={split.val_re}",
+    }
 
     results: List[Dict[str, Any]] = []
     random_layouts_by_ns: Dict[int, List[List[int]]] = (
@@ -699,13 +879,17 @@ def _run_layout_search_stage(
                                 "train_repeat_id": t_rep,
                                 "train_seed": t_seed,
                                 "selection_seed": sel_seed,
-                                "selection_data_domain": sel_domain,
+                                "selection_data_domain": strategy_domains[strategy],
                                 "re_fold_id": split.fold_id,
                                 "variance_source": "layout_and_train_seed",
                             }
                         )
             else:
-                indices = _deterministic_layout_indices(strategy, ns, theta)
+                indices = (
+                    _GEOMETRY_LAYOUTS[strategy](theta, ns)
+                    if strategy in _GEOMETRY_LAYOUTS
+                    else sorted(orders[strategy][:ns])
+                )
                 lid = layout_id_short(indices)
                 for t_rep in range(cfg.deterministic_repeats):
                     t_seed = paired_train_seed(cfg.base_seed, ns, t_rep)
@@ -720,17 +904,20 @@ def _run_layout_search_stage(
                             "train_repeat_id": t_rep,
                             "train_seed": t_seed,
                             "selection_seed": sel_seed,
-                            "selection_data_domain": sel_domain,
+                            "selection_data_domain": strategy_domains[strategy],
                             "re_fold_id": split.fold_id,
                             "variance_source": "train_seed",
                         }
                     )
 
     payload = {
-        "schema_version": "wp_a_layout_search_results_v1",
+        "schema_version": "wp_a_layout_search_results_v2",
         "re_fold_id": split.fold_id,
         "candidate_count": int(len(theta)),
+        "candidate_position_fingerprint": pool_fingerprint,
         "selection_data_domain": sel_domain,
+        "strategy_metadata": evidence,
+        "selection_orders": orders,
         "config": {
             "data_dir": str(cfg.data_dir),
             "train_re": list(split.train_re),
@@ -741,6 +928,7 @@ def _run_layout_search_stage(
         },
         "results": results,
     }
+    out_dir.mkdir(parents=True, exist_ok=True)
     res_path = out_dir / "layout_search_results.json"
     atomic_write_json(payload, res_path)
     meta = build_run_meta(
@@ -754,7 +942,13 @@ def _run_layout_search_stage(
         strict_split=True,
         selection_data_domain=sel_domain,
         candidate_count=int(len(theta)),
-        extra={"smoke_not_for_formal": cfg.smoke_not_for_formal},
+        extra={
+            "smoke_not_for_formal": cfg.smoke_not_for_formal,
+            "candidate_position_fingerprint": pool_fingerprint,
+            "strategy_selection_domains": {s: strategy_domains[s] for s in cfg.strategies},
+            "layout_results_sha256": sha256_file(res_path),
+            "train_seeds": sorted({row["train_seed"] for row in results}),
+        },
     )
     write_run_meta(meta, out_dir)
     return {
@@ -765,6 +959,152 @@ def _run_layout_search_stage(
     }
 
 
+def _load_layout_entries(cfg: WPAConfig, ctx: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    if ctx.get("layout_specs"):
+        return [dict(item) for item in ctx["layout_specs"]]
+    paths = list(ctx.get("layout_results_paths", []))
+    if not paths:
+        default_path = cfg.output_root / f"fold_{cfg.fold_id}" / "layout_search" / "layout_search_results.json"
+        if default_path.is_file():
+            paths.append(default_path)
+    entries = []
+    for path in paths:
+        payload = load_json_manifest(path, require_dict=True)
+        for row in payload.get("results", []):
+            if isinstance(row, Mapping):
+                if (payload.get("schema_version") == "wp_a_layout_search_results_v1"
+                        and row.get("strategy") in _TRAIN_LAYOUTS | _VALIDATION_LAYOUTS):
+                    raise ValueError(f"Outdated WP-A search artifact {path}; rerun layout_search")
+                entry = dict(row)
+                if payload.get("candidate_position_fingerprint"):
+                    entry["candidate_position_fingerprint"] = payload["candidate_position_fingerprint"]
+                entries.append(entry)
+    return entries
+
+
+def _prepare_layout_encoders(
+    cfg: WPAConfig,
+    split: ReSplit,
+    mesh: MeshData,
+    layout_entries: Sequence[Mapping[str, Any]],
+    *,
+    evaluation_only: bool,
+    overwrite: bool,
+) -> Dict[Tuple[str, Tuple[int, ...], int, int], Path]:
+    """Train or verify genuinely paired fixed-layout MLP checkpoints before evaluation."""
+    options = cfg.extra.get("layout_protocol", {})
+    if not isinstance(options, Mapping):
+        options = {}
+    hyperparameters = {
+        "num_epochs": cfg.num_epochs,
+        "batch_size": int(options.get("batch_size", 512)),
+        "learning_rate": float(options.get("learning_rate", 1e-3)),
+        "weight_decay": float(options.get("weight_decay", 0.0)),
+        "lambda_re": float(options.get("lambda_re", 1.0)),
+        "lambda_phase": float(options.get("lambda_phase", 1.0)),
+        "min_delta": float(options.get("early_stopping_min_delta", 1e-6)),
+        "patience": int(options.get("early_stopping_patience", 0)) or None,
+    }
+    hidden_dims = [int(n) for n in options.get("hidden_dims", [128, 128, 128])]
+    x_norm_method = str(options.get("x_norm_method", "standard"))
+    re_norm_method = str(options.get("re_norm_method", "standard"))
+    pool_fingerprint = candidate_position_fingerprint(positions_from_theta(mesh.sensor_theta))
+    enforce_locked_test_re_guard(split.train_re + split.val_re, allow_test=False, re_split=split)
+    data_files = {}
+    for re_id in split.train_re + split.val_re:
+        path = cfg.data_dir / f"Re{re_id}.h5"
+        info = path.stat()
+        data_files[str(re_id)] = [info.st_size, info.st_mtime_ns]
+    contract = {
+        "candidate_position_fingerprint": pool_fingerprint,
+        "fold_id": split.fold_id,
+        "train_re": list(split.train_re),
+        "val_re": list(split.val_re),
+        "test_re": list(split.test_re),
+        "data_dir": str(cfg.data_dir.resolve()),
+        "data_files": data_files,
+        "hyperparameters": hyperparameters,
+        "hidden_dims": hidden_dims,
+        "x_norm_method": x_norm_method,
+        "re_norm_method": re_norm_method,
+    }
+    checkpoints = {}
+    train_cases = val_cases = None
+    directory = cfg.output_root / f"fold_{split.fold_id}" / "layout_encoders"
+    for entry in layout_entries:
+        indices = tuple(validate_sensor_indices(entry["sensor_indices"], candidate_count=mesh.ncand))
+        strategy = str(entry["strategy"])
+        layout_repeat = int(entry.get("layout_repeat_id", 0) or 0)
+        train_repeat = int(entry.get("train_repeat_id", 0) or 0)
+        if int(entry.get("nsensor", len(indices))) != len(indices):
+            raise ValueError("WP-A layout sensor count does not match sensor_indices")
+        key = (strategy, indices, layout_repeat, train_repeat)
+        if key in checkpoints:
+            raise ValueError(f"Duplicate WP-A layout training unit: {key}")
+        if strategy == "random":
+            seed = random_layout_train_seed(cfg.base_seed, len(indices), layout_repeat, train_repeat)
+        else:
+            seed = paired_train_seed(cfg.base_seed, len(indices), train_repeat)
+        if entry.get("train_seed") not in (None, "") and int(entry["train_seed"]) != seed:
+            raise ValueError(f"WP-A {strategy} layout {indices} has an unexpected paired training seed")
+        entry_contract = {
+            **contract,
+            "strategy": strategy,
+            "sensor_indices": list(indices),
+            "layout_repeat_id": layout_repeat,
+            "train_repeat_id": train_repeat,
+            "train_seed": seed,
+        }
+        identity = sha256(json.dumps(entry_contract, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+        checkpoint = directory / identity / "best_model.pt"
+        checkpoints[key] = checkpoint
+        if checkpoint.is_file() and (evaluation_only or not overwrite):
+            package = load_legacy_mlp_checkpoint(checkpoint, map_location="cpu")
+            if (package.raw_dict.get("wp_a_encoder_contract") != entry_contract
+                    or package.train_seed != seed or package.train_repeat_id != train_repeat
+                    or package.sensor_indices != list(indices)
+                    or package.candidate_theta_fingerprint != pool_fingerprint):
+                raise ValueError(f"WP-A layout encoder checkpoint provenance mismatch: {checkpoint}")
+            continue
+        if evaluation_only:
+            raise FileNotFoundError(f"Missing paired WP-A encoder checkpoint {checkpoint}; run unify on validation first")
+
+        if train_cases is None:
+            train_cases = load_re_cases(cfg.data_dir, split.train_re, mesh=mesh, test_guard_split=split)
+            val_cases = load_re_cases(cfg.data_dir, split.val_re, mesh=mesh, test_guard_split=split)
+        train_ds, x_norm, re_norm = SensorDataset.from_re_cases(
+            train_cases, indices, fit_normalizers=True, re_split=split,
+            x_norm_method=x_norm_method, re_norm_method=re_norm_method,
+        )
+        val_ds, _, _ = SensorDataset.from_re_cases(
+            val_cases, indices, x_normalizer=x_norm, re_normalizer=re_norm, re_split=split,
+        )
+        train_cfg = EncoderTrainingConfig(
+            **hyperparameters, seed=seed, device=cfg.device, save_best=False,
+        )
+        train_loader = create_sensor_data_loader(
+            train_ds, batch_size=train_cfg.batch_size, shuffle=True, seed=seed,
+        )
+        val_loader = create_sensor_data_loader(val_ds, batch_size=train_cfg.batch_size, shuffle=False)
+        model, history = train_sensor_mlp(
+            train_loader, val_loader, config=train_cfg, hidden_dims=hidden_dims,
+            sensor_indices=indices, re_split=split,
+        )
+        if history.best_epoch is None:
+            raise RuntimeError(f"WP-A layout encoder training found no finite validation score for {key}")
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=checkpoint.parent) as staging:
+            staged = save_mlp_checkpoint(
+                Path(staging) / checkpoint.name, model, x_norm, re_norm, indices,
+                epoch=history.best_epoch, train_seed=seed, strategy=strategy,
+                train_repeat_id=train_repeat, layout_id=layout_id_short(indices),
+                re_split=split, candidate_theta_fingerprint=pool_fingerprint,
+                extra_metadata={"wp_a_encoder_contract": entry_contract},
+            )
+            os.replace(staged, checkpoint)
+    return checkpoints
+
+
 def _run_unify_stage(
     cfg: WPAConfig,
     split: ReSplit,
@@ -773,9 +1113,6 @@ def _run_unify_stage(
     allow_test: bool,
     lock_manifest: Optional[Mapping[str, Any]],
 ) -> Dict[str, Any]:
-    out_dir = cfg.output_root / f"fold_{split.fold_id}" / "unify"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     eval_re_ids = [
         int(r)
         for r in (
@@ -784,33 +1121,112 @@ def _run_unify_stage(
             else (split.test_re if allow_test else split.val_re)
         )
     ]
-    validate_re_split_locked_test_gate(
+    ppinn_ckpt = ctx.get("ppinn_checkpoint")
+    encoder_ckpt = ctx.get("encoder_checkpoint")
+    pod_ckpt = ctx.get("pod_checkpoint")
+    layout_paths = ctx.get("layout_results_paths", [])
+    fold_root = cfg.output_root / f"fold_{split.fold_id}"
+    validation_meta_path = fold_root / "unify" / "run_meta.json"
+    layout_result_path = (
+        layout_paths[0] if len(layout_paths) == 1
+        else fold_root / "layout_search" / "layout_search_results.json"
+    )
+    gate = validate_re_split_locked_test_gate(
         eval_re_ids,
         re_split=split,
         allow_test=allow_test,
         lock_manifest=lock_manifest,
         lock_path=cfg.lock_manifest_path,
+        artifact_paths={
+            "protocol": cfg.protocol_path,
+            "comparisons": cfg.comparisons_path,
+            "selected_ppinn": ppinn_ckpt,
+            "ppinn_checkpoint": ppinn_ckpt,
+            "shared_encoder": encoder_ckpt,
+            "pod_checkpoint": pod_ckpt,
+            "layout_results": layout_result_path,
+            "validation_run_meta": validation_meta_path,
+        },
     )
     enforce_locked_test_re_guard(eval_re_ids, allow_test=allow_test, re_split=split)
 
-    split_label = "test" if (allow_test and set(eval_re_ids) & set(split.test_re)) else "val"
+    test_eval = bool(gate["locked_test_re_requested"])
+    allowed_re = split.test_re if test_eval else split.val_re
+    if not eval_re_ids or set(eval_re_ids) - set(allowed_re):
+        raise ValueError("WP-A unify requires Reynolds numbers from one validation or approved test partition")
+    split_label = "test" if test_eval else "val"
     sel_domain = f"val_re={split.val_re}"
 
-    # Collect layout specs either from context or existing layout_search_results.json
-    layout_entries: List[Dict[str, Any]] = []
-    if ctx.get("layout_specs"):
-        layout_entries = [dict(item) for item in ctx["layout_specs"]]
-    else:
-        search_paths = list(ctx.get("layout_results_paths", []))
-        default_ls = cfg.output_root / f"fold_{split.fold_id}" / "layout_search" / "layout_search_results.json"
-        if not search_paths and default_ls.is_file():
-            search_paths.append(default_ls)
-        for sp in search_paths:
-            loaded = load_json_manifest(sp, require_dict=True)
-            for row in loaded.get("results", []):
-                if isinstance(row, Mapping):
-                    layout_entries.append(dict(row))
+    layout_entries = _load_layout_entries(cfg, ctx)
+    eval_entries = [entry for entry in layout_entries if entry.get("sensor_indices")]
+    shared_encoder = ctx.get("encoder_package")
+    use_shared_encoder = cfg.final_encoder == "shared" or shared_encoder is not None
+    if test_eval and shared_encoder is not None:
+        raise ValueError("WP-A shared test evaluation requires a persisted encoder checkpoint")
+    out_name = "unify_shared" if use_shared_encoder else "unify"
+    out_dir = fold_root / (f"{out_name}_test" if test_eval else out_name)
+    pod_model = ctx.get("pod_model")
+    layout_checkpoints = {}
+    if ppinn_ckpt is not None:
+        mesh = load_mesh(cfg.data_dir / cfg.mesh_file)
+        pool_fingerprint = candidate_position_fingerprint(positions_from_theta(mesh.sensor_theta))
+        if any(
+            entry.get("candidate_position_fingerprint") not in (None, "", pool_fingerprint)
+            for entry in eval_entries
+        ):
+            raise ValueError("Saved WP-A layouts do not match the candidate positions on the deployment mesh")
+        ppinn_pkg = load_legacy_ppinn_checkpoint(ppinn_ckpt, map_location=cfg.device)
+        validate_ppinn_for_layout_search(ppinn_pkg, re_split=split, expected_D=mesh.cylinder_diameter)
+        if eval_entries and use_shared_encoder:
+            if shared_encoder is None:
+                if encoder_ckpt is None:
+                    raise FileNotFoundError("WP-A shared evaluation requires a fixed checkpoint")
+                shared_encoder = _load_encoder_package(Path(encoder_ckpt), cfg.device)
+            positions = getattr(shared_encoder, "candidate_position_fingerprint", None)
+            if positions is not None and positions != pool_fingerprint:
+                raise ValueError("Shared encoder candidate positions do not match the WP-A deployment mesh")
+            stats_re = set(getattr(shared_encoder, "channel_stats_re_ids", ()) or ())
+            enforce_locked_test_re_guard(sorted(stats_re), allow_test=False, re_split=split)
+            if stats_re - set(split.train_re):
+                raise ValueError("WP-A shared encoder normalization was not fitted on training Re only")
+        elif eval_entries:
+            layout_checkpoints = _prepare_layout_encoders(
+                cfg, split, mesh, eval_entries,
+                evaluation_only=test_eval, overwrite=bool(ctx.get("overwrite", False)),
+            )
+        if pod_model is None and pod_ckpt is not None:
+            pod_model = load_pod_checkpoint(pod_ckpt)
+    elif test_eval or not any(entry.get("metrics") for entry in layout_entries):
+        raise FileNotFoundError("WP-A unify requires a selected pPINN checkpoint or existing layout metrics")
 
+    layout_checkpoint_records = [
+        {
+            "strategy": key[0], "layout_fingerprint": layout_fingerprint(key[1]),
+            "layout_repeat_id": key[2], "train_repeat_id": key[3],
+            "train_seed": (
+                random_layout_train_seed(cfg.base_seed, len(key[1]), key[2], key[3])
+                if key[0] == "random"
+                else paired_train_seed(cfg.base_seed, len(key[1]), key[3])
+            ),
+            "path": str(path), "sha256": sha256_file(path),
+        }
+        for key, path in layout_checkpoints.items()
+    ]
+    if test_eval and layout_checkpoints:
+        validation_meta = load_json_manifest(validation_meta_path, require_dict=True)
+        recorded = {
+            (r["strategy"], r["layout_fingerprint"], r["layout_repeat_id"], r["train_repeat_id"]): r["sha256"]
+            for r in validation_meta.get("extra", {}).get("layout_encoder_checkpoints", [])
+        }
+        for record in layout_checkpoint_records:
+            key = (record["strategy"], record["layout_fingerprint"], record["layout_repeat_id"], record["train_repeat_id"])
+            if recorded.get(key) != record["sha256"]:
+                raise ValueError(f"WP-A test encoder does not match the completed validation run: {key}")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    shared_path = getattr(shared_encoder, "checkpoint_path", None)
+    if shared_encoder is not None and ctx.get("encoder_package") is None:
+        shared_path = encoder_ckpt
     run_meta = build_run_meta(
         stage="eval_pipeline",
         output_dir=out_dir,
@@ -821,43 +1237,38 @@ def _run_unify_stage(
         re_fold_id=split.fold_id,
         strict_split=True,
         selection_data_domain=sel_domain,
-        ppinn_checkpoint_path=ctx.get("ppinn_checkpoint") or cfg.ppinn_checkpoint,
-        pod_checkpoint_path=ctx.get("pod_checkpoint") or cfg.pod_checkpoint,
+        ppinn_checkpoint_path=ppinn_ckpt,
+        pod_checkpoint_path=pod_ckpt,
         extra={
             "allow_test": bool(allow_test),
             "smoke_not_for_formal": cfg.smoke_not_for_formal,
             "layout_count": len(layout_entries),
+            "final_encoder": "shared" if use_shared_encoder else "mlp",
+            "shared_encoder_sha256": sha256_file(shared_path)
+            if shared_path is not None and Path(shared_path).is_file()
+            else None,
+            "layout_encoder_checkpoints": layout_checkpoint_records,
         },
     )
     run_id = str(run_meta["run_id"])
     long_rows: List[Dict[str, Any]] = []
 
-    ppinn_ckpt = ctx.get("ppinn_checkpoint") or cfg.ppinn_checkpoint
-    encoder_ckpt = ctx.get("encoder_checkpoint") or cfg.dynamic_checkpoint
-    pod_model = ctx.get("pod_model")
-
-    mesh_path = cfg.data_dir / cfg.mesh_file
-    cases_available = mesh_path.is_file() and all(
-        (cfg.data_dir / f"Re{r}.h5").is_file() for r in eval_re_ids
-    )
-
     oracle_res = None
-    if ppinn_ckpt is not None and Path(ppinn_ckpt).is_file() and cases_available:
-        mesh = load_mesh(mesh_path)
+    if ppinn_ckpt is not None:
         cases = load_re_cases(
             cfg.data_dir,
             eval_re_ids,
             mesh=mesh,
             load_field=True,
-            test_guard_split=None if allow_test else split,
+            test_guard_split=None if test_eval else split,
         )
-        ppinn_pkg = load_legacy_ppinn_checkpoint(ppinn_ckpt, map_location=cfg.device)
         oracle_res = evaluate_ppinn_oracle(
             ppinn_pkg,
             cases,
             mesh,
             allow_test=allow_test,
             re_split=split,
+            complete_only=True,
             chunk_size=cfg.eval_chunk_size,
             device=cfg.device,
         )
@@ -870,6 +1281,7 @@ def _run_unify_stage(
                 split=split_label,
                 strategy="oracle_reference",
                 evaluator="ppinn_oracle",
+                complete_cycles_only=True,
                 nsensor=0,
                 layout_id="oracle",
                 selection_data_domain=sel_domain,
@@ -881,27 +1293,32 @@ def _run_unify_stage(
             )
         )
 
-        encoder_pkg = None
-        if ctx.get("encoder_package") is not None:
-            encoder_pkg = ctx["encoder_package"]
-        elif encoder_ckpt is not None and Path(encoder_ckpt).is_file():
-            encoder_pkg = _load_encoder_package(Path(encoder_ckpt), cfg.device)
-
-        if encoder_pkg is not None:
-            for entry in layout_entries:
+        if eval_entries:
+            seen_shared = set()
+            for entry in eval_entries:
                 indices = [int(i) for i in entry.get("sensor_indices", [])]
-                if not indices:
-                    continue
                 strategy = str(entry.get("strategy", "unknown"))
                 ns = int(entry.get("nsensor", len(indices)))
                 lid = str(entry.get("layout_id") or layout_id_short(indices))
                 t_rep = int(entry.get("train_repeat_id", 0) or 0)
                 l_rep = int(entry.get("layout_repeat_id", 0) or 0)
-                t_seed = int(
-                    entry.get("train_seed")
-                    if entry.get("train_seed") not in (None, "")
-                    else paired_train_seed(cfg.base_seed, ns, t_rep)
-                )
+                if use_shared_encoder:
+                    shared_key = (strategy, tuple(indices), l_rep)
+                    if shared_key in seen_shared:
+                        continue
+                    seen_shared.add(shared_key)
+                    encoder_pkg = shared_encoder
+                    raw_shared = getattr(shared_encoder, "raw_dict", None) or {}
+                    t_seed = raw_shared.get("train_seed")
+                    t_rep = raw_shared.get("train_repeat_id")
+                    evaluator = "ppinn_shared_closed_loop"
+                    variance_source = "shared_checkpoint"
+                else:
+                    checkpoint = layout_checkpoints[(strategy, tuple(indices), l_rep, t_rep)]
+                    encoder_pkg = load_legacy_mlp_checkpoint(checkpoint, map_location=cfg.device)
+                    t_seed = encoder_pkg.train_seed
+                    evaluator = "ppinn_closed_loop"
+                    variance_source = str(entry.get("variance_source", "train_seed"))
                 s_seed = int(
                     entry.get("selection_seed")
                     if entry.get("selection_seed") not in (None, "")
@@ -915,45 +1332,28 @@ def _run_unify_stage(
                     sensor_indices=indices,
                     allow_test=allow_test,
                     re_split=split,
+                    complete_only=True,
                     chunk_size=cfg.eval_chunk_size,
                     device=cfg.device,
                 )
-                long_rows.extend(
-                    evaluate_cases_to_long_rows(
-                        cl_res,
-                        run_id=run_id,
-                        stage="eval_pipeline",
-                        re_fold=split.fold_id,
-                        split=split_label,
-                        strategy=strategy,
-                        evaluator="ppinn_closed_loop",
-                        nsensor=ns,
-                        layout_id=lid,
-                        selection_data_domain=sel_domain,
-                        train_seed=t_seed,
-                        selection_seed=s_seed,
-                        layout_repeat_id=l_rep,
-                        train_repeat_id=t_rep,
-                        variance_source=str(entry.get("variance_source", "train_seed")),
-                    )
-                )
-                # Record sensor_excess = E_closed - E_oracle (overall, per_re, per_cycle)
                 excess_kw = dict(
                     run_id=run_id,
                     stage="eval_pipeline",
                     re_fold=split.fold_id,
                     split=split_label,
                     strategy=strategy,
-                    evaluator="ppinn_closed_loop",
+                    evaluator=evaluator,
                     nsensor=ns,
                     layout_id=lid,
-                    selection_data_domain=sel_domain,
+                    selection_data_domain=entry.get("selection_data_domain") or sel_domain,
                     train_seed=t_seed,
                     selection_seed=s_seed,
                     layout_repeat_id=l_rep,
                     train_repeat_id=t_rep,
-                    variance_source=str(entry.get("variance_source", "train_seed")),
+                    variance_source=variance_source,
                 )
+                long_rows.extend(evaluate_cases_to_long_rows(cl_res, complete_cycles_only=True, **excess_kw))
+                # Record sensor_excess = E_closed - E_oracle (overall, per_re, per_cycle)
                 e_o_overall = oracle_res.overall.get(PRIMARY_METRIC)
                 e_c_overall = cl_res.overall.get(PRIMARY_METRIC)
                 if e_o_overall is not None and e_c_overall is not None:
@@ -985,6 +1385,8 @@ def _run_unify_stage(
                     (int(r["re_id"]), int(r["cycle_id"])): r for r in oracle_res.per_cycle
                 }
                 for cl_cyc in cl_res.per_cycle:
+                    if not cl_cyc.get("complete_block"):
+                        continue
                     key = (int(cl_cyc["re_id"]), int(cl_cyc["cycle_id"]))
                     o_cyc = oracle_by_cyc.get(key)
                     if o_cyc and PRIMARY_METRIC in o_cyc and PRIMARY_METRIC in cl_cyc:
@@ -1007,6 +1409,7 @@ def _run_unify_stage(
                 mesh=mesh,
                 allow_test=allow_test,
                 re_split=split,
+                complete_only=True,
             )
             long_rows.extend(
                 evaluate_cases_to_long_rows(
@@ -1017,6 +1420,7 @@ def _run_unify_stage(
                     split=split_label,
                     strategy="pod_baseline",
                     evaluator="pod",
+                    complete_cycles_only=True,
                     nsensor=0,
                     layout_id="pod",
                     selection_data_domain=sel_domain,
@@ -1063,7 +1467,7 @@ def _run_unify_stage(
                         evaluator=str(entry.get("evaluator", "ppinn_closed_loop")),
                         nsensor=ns,
                         layout_id=lid,
-                        selection_data_domain=sel_domain,
+                        selection_data_domain=entry.get("selection_data_domain") or sel_domain,
                         train_seed=t_seed,
                         selection_seed=s_seed,
                         layout_repeat_id=l_rep,
@@ -1150,6 +1554,7 @@ def _run_plot_stage(cfg: WPAConfig, ctx: Mapping[str, Any]) -> Dict[str, Any]:
     plot_dir.mkdir(parents=True, exist_ok=True)
     outputs: Dict[str, Any] = {}
 
+    entries = _load_layout_entries(cfg, ctx)
     mesh_path = cfg.data_dir / cfg.mesh_file
     if mesh_path.is_file():
         mesh = load_mesh(mesh_path)
@@ -1157,18 +1562,35 @@ def _run_plot_stage(cfg: WPAConfig, ctx: Mapping[str, Any]) -> Dict[str, Any]:
         radius = float(mesh.cylinder_radius or (mesh.cylinder_diameter / 2.0))
         center = np.asarray(mesh.cylinder_center or (0.0, 0.0), dtype=np.float64)
     else:
+        if entries:
+            raise FileNotFoundError(f"Plotting saved WP-A layouts requires the deployment mesh: {mesh_path}")
         theta = np.linspace(0.0, 2.0 * math.pi, 60, endpoint=False)
         radius = 0.005
         center = np.array([0.0, 0.0], dtype=np.float64)
 
     layouts_for_plot: List[Dict[str, Any]] = []
+    pool_fingerprint = candidate_position_fingerprint(positions_from_theta(theta))
+    if any(
+        entry.get("candidate_position_fingerprint") not in (None, "", pool_fingerprint)
+        for entry in entries
+    ):
+        raise ValueError("Saved WP-A layouts do not match the candidate positions on the plotting mesh")
+    first_count = cfg.sensor_counts[0]
+    saved_layouts = {}
+    for entry in entries:
+        if entry.get("nsensor") == first_count and entry.get("sensor_indices"):
+            saved_layouts.setdefault(entry["strategy"], entry["sensor_indices"])
     for strategy in cfg.strategies:
         if strategy == "random":
             continue
-        ns = int(cfg.sensor_counts[0])
-        indices = _deterministic_layout_indices(strategy, ns, theta)
+        if strategy in saved_layouts:
+            indices = saved_layouts[strategy]
+        elif strategy in _GEOMETRY_LAYOUTS:
+            indices = _GEOMETRY_LAYOUTS[strategy](theta, first_count)
+        else:
+            raise ValueError(f"No saved WP-A {strategy} layout for {first_count} sensors; run layout_search first")
         layouts_for_plot.append(
-            {"strategy": strategy, "sensor_count": ns, "sensor_indices": indices}
+            {"strategy": strategy, "sensor_count": first_count, "sensor_indices": indices}
         )
     if layouts_for_plot:
         outputs["layouts"] = plot_sensor_layouts(
@@ -1262,6 +1684,11 @@ def run_wp_a(
         )
 
     executors = dict(stage_executors or {})
+    ppinn_checkpoint = cfg.ppinn_checkpoint
+    if ppinn_checkpoint is None:
+        selected_path = cfg.output_root / "ppinn_selection" / "best_ppinn.pt"
+        if selected_path.is_file():
+            ppinn_checkpoint = selected_path
     ctx: Dict[str, Any] = {
         "config": cfg,
         "re_split": split,
@@ -1270,7 +1697,7 @@ def run_wp_a(
         "lock_manifest": resolved_lock,
         "eval_re_ids": list(eval_re_ids) if eval_re_ids is not None else None,
         "layout_specs": list(layout_specs) if layout_specs is not None else None,
-        "ppinn_checkpoint": cfg.ppinn_checkpoint,
+        "ppinn_checkpoint": ppinn_checkpoint,
         "encoder_checkpoint": Path(encoder_checkpoint) if encoder_checkpoint else cfg.dynamic_checkpoint,
         "encoder_package": encoder_package,
         "pod_checkpoint": cfg.pod_checkpoint,

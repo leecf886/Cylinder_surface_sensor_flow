@@ -37,7 +37,10 @@ if ($ProcessedDir) {
 if ($RunsDir) {
     $CliArgs += @("--runs-dir", $RunsDir)
 }
-$CliArgs += @("wp-b", "--stages", $Stages, "--mode", $Mode)
+$CliArgs += @("wp-b", "--stages", $Stages)
+if ($PSBoundParameters.ContainsKey("Mode")) {
+    $CliArgs += @("--mode", $Mode)
+}
 if ($DryRun.IsPresent) {
     $CliArgs += "--dry-run"
 }
@@ -48,7 +51,7 @@ if ($ExtraArgs) {
     $CliArgs += $ExtraArgs
 }
 
-Write-Host "WP-B wrapper: stages=$Stages mode=$Mode dry_run=$($DryRun.IsPresent) allow_test=$($AllowTest.IsPresent)"
+Write-Host "WP-B wrapper: stages=$Stages dry_run=$($DryRun.IsPresent) allow_test=$($AllowTest.IsPresent)"
 Write-Host ("Command: " + $PythonExe + " " + ($CliArgs -join " "))
 
 & $PythonExe @CliArgs

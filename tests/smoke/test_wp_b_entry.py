@@ -1,6 +1,7 @@
 """Smoke tests for Work Package B workflow (dynamic encoder & 8-variant arch ablation)."""
 from __future__ import annotations
 
+import csv
 import json
 import math
 from pathlib import Path
@@ -10,6 +11,9 @@ import numpy as np
 import pytest
 import torch
 
+from cylinder_flow.artifacts.checkpoints import load_ablation_checkpoint, load_deepsets_checkpoint, save_ppinn_checkpoint
+from cylinder_flow.cli import main
+from cylinder_flow.data.h5 import save_mesh, save_re_case
 from cylinder_flow.data.types import MeshData, ReCaseData
 from cylinder_flow.models.ablations import (
     ARCH_ABLATION_VARIANT_IDS,
@@ -54,7 +58,7 @@ def _make_synthetic_mesh_and_cases(
     )
     cases: Dict[int, ReCaseData] = {}
     for re_val in re_ids:
-        phase = np.linspace(0.0, 4.0 * math.pi, nt, endpoint=False) % (2.0 * math.pi)
+        phase = np.linspace(0.0, 6.0 * math.pi, nt, endpoint=False) % (2.0 * math.pi)
         sensor_uvp = rng.standard_normal((nt, ncand, 3)).astype(np.float32)
         field_uvp = rng.standard_normal((nt, nroi, 3)).astype(np.float32)
         cases[int(re_val)] = ReCaseData(
@@ -143,9 +147,15 @@ def test_wp_b_guards_dry_run_and_stage_executors(tmp_path: Path) -> None:
     with pytest.raises(PermissionError):
         run_wp_b(cfg, stages=("preflight",), cases=locked_cases, mesh=mesh, allow_test=False)
 
-    # Formal allow_test=True without approved lock also raises PermissionError
+    # Non-formal test evaluation still needs a real approved lock before reading data.
     with pytest.raises(PermissionError):
-        run_wp_b(cfg, stages=("evaluate",), eval_split="test", allow_test=True, formal=True)
+        run_wp_b(cfg, stages=("evaluate",), eval_split="test", allow_test=True)
+    cfg.lock_path = tmp_path / "example_lock.json"
+    cfg.lock_path.write_text(json.dumps({"approval_status": "approved", "example_not_formal": True}), encoding="utf-8")
+    with pytest.raises(PermissionError):
+        run_wp_b(cfg, stages=("evaluate",), eval_split="test", allow_test=True)
+    with pytest.raises(PermissionError, match="after training"):
+        run_wp_b(cfg, stages=("train", "evaluate"), allow_test=True)
 
     # Mode dispatch + stage_executors injection for arch_ablation
     called: Dict[str, Dict[str, object]] = {}
@@ -180,7 +190,7 @@ def test_wp_b_guards_dry_run_and_stage_executors(tmp_path: Path) -> None:
 
 def test_wp_b_mini_eval_aggregate_stats_plot_end_to_end(tmp_path: Path) -> None:
     torch.manual_seed(42)
-    mesh, val_cases = _make_synthetic_mesh_and_cases(re_ids=(350, 450), nt=10, ncand=60, nroi=12)
+    mesh, val_cases = _make_synthetic_mesh_and_cases(re_ids=(450,), nt=16, ncand=60, nroi=12)
     ppinn = PPINNModel(hidden_dims=(16, 16), D=mesh.cylinder_diameter)
     ppinn.eval()
 
@@ -324,3 +334,70 @@ def test_wp_b_mini_eval_aggregate_stats_plot_end_to_end(tmp_path: Path) -> None:
     )
     assert arch_res["stage_results"]["ablation_evaluate"]["n_rows"] > 0
     assert Path(arch_res["stage_results"]["stats"]["stats_csv"]).is_file()
+
+
+@pytest.mark.parametrize("mode", ("dynamic", "arch_ablation"))
+def test_wp_b_cli_trains_and_reloads_paired_models(tmp_path: Path, mode: str) -> None:
+    dynamic = mode == "dynamic"
+    n_candidates = 8 if dynamic else 60
+    train_count, holdout_count = (2, 3) if dynamic else (6, 10)
+    mesh, cases = _make_synthetic_mesh_and_cases(nt=16, ncand=n_candidates, nroi=8)
+    data = tmp_path / "data"
+    data.mkdir()
+    save_mesh(data / "mesh.h5", mesh)
+    for re_id, case in cases.items():
+        save_re_case(data / f"Re{re_id}.h5", case)
+    ppinn = save_ppinn_checkpoint(tmp_path / "ppinn.pt", PPINNModel(hidden_dims=(8, 8)), save_config_json=False)
+
+    output = tmp_path / "out"
+    cfg_path = tmp_path / "cfg.json"
+    cfg_path.write_text(json.dumps({
+        "mode": mode, "candidate_count": n_candidates, "processed_dir": str(data),
+        "paths": {"output_root": str(output), "ppinn_checkpoint": str(ppinn)},
+        "training": {"num_epochs": 1, "batch_size": 16, "training_sensor_counts": [train_count]},
+        "unseen_sensor_count_protocol": {"holdout_counts": [holdout_count]}, "layouts_per_count": 1,
+        "seeds": {"base_seed": 42, "model_repeat_ids": [0]}, "device": "cpu",
+        "dynamic_variants": ["main", "pool_max"],
+        "exact_k_dropout": {"inference_dropout": True, "failure_seeds": [0, 1], "evaluation_budgets": [train_count]},
+        "model_variants": {"required_variant_ids": ["arch_main_phi_pool_linear", "arch_fourier_k2_ridge"]},
+        "re_split": {"train_re": [350], "val_re": [450], "test_re": [250, 650]},
+    }), encoding="utf-8")
+    assert main(["wp-b", "--config", str(cfg_path), "--stages", "train"]) == 0
+    stage = "evaluate" if dynamic else "ablation_evaluate"
+    assert main(["wp-b", "--config", str(cfg_path), "--stages", stage]) == 0
+
+    manifest_path = output / "03_train" / mode / "trained_checkpoints.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    records = manifest["shared_checkpoints"]
+    assert len(records) == 2
+    assert {record["train_seed"] for record in records + manifest["specialized_checkpoints"]} == {700042}
+    assert all(record["best_epoch"] == 1 for record in records)
+    if dynamic:
+        assert len(manifest["specialized_checkpoints"]) == 2
+        assert [load_deepsets_checkpoint(row["checkpoint_path"]).pool for row in records] == ["mean+max", "max"]
+    else:
+        assert manifest["specialized_checkpoints"] == []
+        ridge = load_ablation_checkpoint(records[1]["checkpoint_path"])
+        assert ridge.fitted_exposure_count == 16
+        assert ridge.arch_variant == "arch_fourier_k2_ridge"
+
+    subdir = "04_evaluate" if dynamic else "04_ablation_evaluate"
+    with (output / subdir / "wp_b_metrics_long.csv").open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows and all(row["split"] == "val" for row in rows)
+    assert {row["re_id"] for row in rows if row["re_id"]} == {"450"}
+    fixed = [row for row in rows if row["shared_or_specialized"] == "specialized"]
+    expected = {row["checkpoint_path"]: row["layout_id"] for row in manifest["specialized_checkpoints"]}
+    assert {row["checkpoint"]: row["layout_id"] for row in fixed} == expected
+    dropout_rows = [row for row in rows if row["strategy"] == "wp_b_dropout" and row["metric"] == "re_mae"]
+    if dynamic:
+        assert len(dropout_rows) == 8
+        assert {row["dropout_k"] for row in dropout_rows} == {"0", "1"}
+        for row in dropout_rows:
+            assert row["shared_or_specialized"] == "shared"
+            assert len(row["failure_mask_fingerprint"]) == 64
+            matches = [r for r in dropout_rows if (r["dropout_k"], r["failure_seed"]) == (row["dropout_k"], row["failure_seed"])]
+            assert len({match["failure_mask_fingerprint"] for match in matches}) == 1
+            assert bool(row["failure_dropped_sensor_indices"]) == (row["dropout_k"] == "1")
+    else:
+        assert not dropout_rows

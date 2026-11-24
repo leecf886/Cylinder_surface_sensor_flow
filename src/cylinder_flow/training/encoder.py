@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader
 
 from cylinder_flow.artifacts.checkpoints import (
     load_deepsets_checkpoint,
+    save_ablation_checkpoint,
     save_deepsets_checkpoint,
     save_mlp_checkpoint,
 )
@@ -32,6 +33,11 @@ from cylinder_flow.data.splits import ReSplit
 from cylinder_flow.evaluation.regression import (
     compute_circular_metrics,
     compute_regression_metrics,
+)
+from cylinder_flow.models.ablations import (
+    DynamicArchitectureAblationRegressor,
+    FourierRidgeRegressor,
+    StreamingRidgeAccumulator,
 )
 from cylinder_flow.models.deepsets import (
     DynamicSensorBatch,
@@ -1246,6 +1252,7 @@ class DeepSetsTrainingConfig:
             Formal mode (False) strictly enforces validation data and frozen 60-candidate panel.
         chunk_size: Snapshot chunk size for dynamic validation evaluation (default 8192).
         validation_mode: Validation evaluation mode ('frozen_panel' or 'standard', default 'frozen_panel').
+        dataloader_shuffle_seed: Optional independent seed for training-batch order.
     """
 
     learning_rate: float = 1e-3
@@ -1272,6 +1279,7 @@ class DeepSetsTrainingConfig:
     smoke_not_for_formal: bool = False
     chunk_size: int = 8192
     validation_mode: str = "frozen_panel"
+    dataloader_shuffle_seed: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.learning_rate <= 0.0:
@@ -1379,6 +1387,30 @@ class DeepSetsTrainer:
         if dev_str == "auto":
             return torch.device("cuda" if torch.cuda.is_available() else "cpu")
         return torch.device(dev_str)
+
+    @torch.no_grad()
+    def _fit_ridge_epoch(
+        self,
+        model: FourierRidgeRegressor,
+        loader: DataLoader,
+        accumulator: StreamingRidgeAccumulator,
+        device: torch.device,
+        epoch: int,
+    ) -> Dict[str, float]:
+        model.eval()
+        for values, positions, mask, count, target, *_ in loader:
+            features = model.extract_features(*(tensor.to(device) for tensor in (values, positions, mask, count)))
+            accumulator.update(features.cpu().numpy(), target.cpu().numpy())
+        mean, scale, coef, intercept = accumulator.fit()
+        model.set_fitted_solution(mean, scale, coef, intercept, fitted_exposure_count=accumulator.n, best_epoch=epoch)
+        mse = accumulator.mse_by_output(mean, scale, coef, intercept)
+        loss_re = float(mse[0])
+        loss_phase = float(np.mean(mse[1:3]))
+        return {
+            "loss_re": loss_re,
+            "loss_phase": loss_phase,
+            "loss_total": self.config.lambda_re * loss_re + self.config.lambda_phase * loss_phase,
+        }
 
     def train_one_epoch(
         self,
@@ -2005,12 +2037,12 @@ class DeepSetsTrainer:
         else:
             sn_seed = int(self.config.seed + 300007)
 
-        if hasattr(train_loader, "generator") and train_loader.generator is not None:
-            train_loader.generator.manual_seed(int(self.config.seed))
-
+        shuffle_seed = self.config.dataloader_shuffle_seed
+        if shuffle_seed is None:
+            shuffle_seed = self.config.seed
         if hasattr(train_loader, "reset") and callable(train_loader.reset):
             train_loader.reset(
-                seed=self.config.seed,
+                seed=shuffle_seed,
                 token_dropout_seed=td_seed,
                 sensor_noise_seed=sn_seed,
                 layout_sampler_seed=ls_seed,
@@ -2018,7 +2050,7 @@ class DeepSetsTrainer:
         else:
             reset_dynamic_loader(
                 train_loader,
-                seed=self.config.seed,
+                seed=shuffle_seed,
                 token_dropout_seed=td_seed,
                 sensor_noise_seed=sn_seed,
                 layout_sampler_seed=ls_seed,
@@ -2034,7 +2066,8 @@ class DeepSetsTrainer:
         device = self.resolve_device(self.config.device)
         model = model.to(device)
 
-        if optimizer is None:
+        ridge_accumulator = StreamingRidgeAccumulator() if isinstance(model, FourierRidgeRegressor) else None
+        if optimizer is None and ridge_accumulator is None:
             optimizer = torch.optim.Adam(
                 model.parameters(),
                 lr=self.config.learning_rate,
@@ -2044,6 +2077,7 @@ class DeepSetsTrainer:
         history = DeepSetsTrainHistory()
         best_selection_loss = float("inf")
         best_epoch = -1
+        best_ridge_exposure = 0
         best_state_dict = copy.deepcopy(model.state_dict())
         epochs_without_improvement = 0
 
@@ -2080,12 +2114,12 @@ class DeepSetsTrainer:
 
         for epoch in range(1, self.config.num_epochs + 1):
             t0 = time.perf_counter()
-            train_out = self.train_one_epoch(
-                model=model,
-                loader=train_loader,
-                optimizer=optimizer,
-                device=device,
-            )
+            if isinstance(model, FourierRidgeRegressor):
+                assert ridge_accumulator is not None
+                train_out = self._fit_ridge_epoch(model, train_loader, ridge_accumulator, device, epoch)
+            else:
+                assert optimizer is not None
+                train_out = self.train_one_epoch(model, train_loader, optimizer, device)
             wall_time = float(time.perf_counter() - t0)
 
             if use_frozen_panel:
@@ -2148,6 +2182,8 @@ class DeepSetsTrainer:
                 best_selection_loss = selection_loss
                 best_epoch = epoch
                 best_state_dict = copy.deepcopy(model.state_dict())
+                if ridge_accumulator is not None:
+                    best_ridge_exposure = ridge_accumulator.n
                 best_panel_out = copy.deepcopy(latest_panel_out) if latest_panel_out is not None else None
                 best_val_out = copy.deepcopy(latest_val_out) if latest_val_out is not None else None
                 epochs_without_improvement = 0
@@ -2208,6 +2244,7 @@ class DeepSetsTrainer:
                         "sensor_noise_seed": sn_seed,
                         "layout_sampler_seed": ls_seed,
                         "actual_augmentation_seeds": actual_aug_seeds,
+                        "dataloader_shuffle_seed": shuffle_seed,
                         "sample_distribution": sample_dist,
                         "batch_distribution": batch_dist,
                     }
@@ -2271,6 +2308,22 @@ class DeepSetsTrainer:
                             train_seed=self.config.seed,
                             extra_metadata=checkpoint_extra,
                         )
+                    elif isinstance(model, (DynamicArchitectureAblationRegressor, FourierRidgeRegressor)):
+                        save_ablation_checkpoint(
+                            path=ckpt_file,
+                            model=model,
+                            candidate_positions=cand_pos_arr,
+                            training_sensor_counts=train_counts,
+                            chan_mean=model.chan_mean.detach().cpu().numpy().reshape(-1),
+                            chan_std=model.chan_std.detach().cpu().numpy().reshape(-1),
+                            channel_stats_re_ids=stats_re_ids,
+                            re_normalizer=re_norm,
+                            default_sensor_indices=def_indices,
+                            epoch=epoch,
+                            best_epoch=epoch,
+                            train_seed=self.config.seed,
+                            extra_metadata=checkpoint_extra,
+                        )
                     elif isinstance(model, SetSensorEncoder):
                         torch.save(
                             {
@@ -2319,6 +2372,9 @@ class DeepSetsTrainer:
 
         # Re-load best checkpoint weights into model before returning
         model.load_state_dict(best_state_dict)
+        if isinstance(model, FourierRidgeRegressor):
+            model.fitted_exposure_count = best_ridge_exposure
+            model.best_epoch = best_epoch
         history.best_epoch = best_epoch
         history.best_selection_loss = best_selection_loss
 

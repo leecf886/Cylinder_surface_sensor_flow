@@ -44,6 +44,7 @@
     "random_train_repeats": 1,
     "base_seed": 42,
     "num_epochs": 200,
+    "final_encoder": "mlp",
     "selection_data_domain": "val_re=[450,800]"
   },
   "statistical_protocol": {

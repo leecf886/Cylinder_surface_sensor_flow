@@ -213,7 +213,7 @@ class TestGaugeAndCycleAggregation:
         ppinn = PPINNModel(hidden_dims=(8,), D=mesh.cylinder_diameter)
 
         res_all = evaluate_ppinn_oracle(ppinn, [case450], mesh, complete_only=False)
-        res_comp = evaluate_ppinn_oracle(ppinn, [case450], mesh, complete_only=True)
+        res_comp = evaluate_ppinn_oracle(ppinn, [case450], mesh)
 
         assert len(res_all.per_cycle) == 3
         assert [c["complete_block"] for c in res_all.per_cycle] == [False, True, False]
@@ -224,6 +224,10 @@ class TestGaugeAndCycleAggregation:
         complete_cycle = res_all.per_cycle[1]
         assert res_comp.overall["u_rel_l2"] == pytest.approx(complete_cycle["u_rel_l2"], rel=1e-12)
         assert res_comp.overall["p_rel_l2"] == pytest.approx(complete_cycle["p_rel_l2"], rel=1e-12)
+
+        incomplete_case = _make_case(450.0, mesh, phase=phase[:3])
+        with pytest.raises(ValueError, match="Re=450: no complete shedding cycles"):
+            evaluate_ppinn_oracle(ppinn, [incomplete_case], mesh)
 
 
 class TestClosedLoopAndPODRunners:

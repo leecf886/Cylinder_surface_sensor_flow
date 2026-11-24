@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 import hashlib
 import json
 import math
@@ -33,7 +33,6 @@ from cylinder_flow.artifacts.manifests import (
     require_approved_status,
     sha256_array,
     sha256_file,
-    sha256_json_canonical,
     validate_analysis_lock,
     validate_no_placeholder_paths,
     validate_output_isolation,
@@ -209,6 +208,12 @@ def _canonical_sha256(payload: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _artifact_sha256(path: Optional[Path], payload: Any) -> str:
+    if path is not None and path.is_file():
+        return sha256_file(path)
+    return _canonical_sha256(payload) if payload is not None else ""
+
+
 def _resolve_rel_path(
     raw: Optional[Union[str, Path]],
     *,
@@ -266,7 +271,7 @@ class WPCConfig:
     device: str = "cpu"
     chunk_size: int = 16384
     output_scale: str = "nondimensional"
-    complete_only: bool = False
+    complete_only: bool = True
     n_bootstrap: int = 2000
     bootstrap_seed: int = 20260729
     no_png: bool = False
@@ -511,7 +516,7 @@ def load_wp_c_config(
         device=str(raw.get("device", "cpu")),
         chunk_size=int(raw.get("chunk_size", 16384)),
         output_scale=str(raw.get("output_scale", "nondimensional")),
-        complete_only=bool(raw.get("complete_only", False)),
+        complete_only=bool(raw.get("complete_only", True)),
         n_bootstrap=int(raw.get("n_bootstrap", 2000)),
         bootstrap_seed=int(raw.get("bootstrap_seed", 20260729)),
         no_png=bool(raw.get("no_png", False)),
@@ -536,6 +541,7 @@ class WPCProgressStore:
         *,
         contract: Optional[Mapping[str, Any]] = None,
         resume: bool = False,
+        run_id: str = "",
     ) -> None:
         self.root = Path(output_dir) / "_progress_v1"
         self.shards_dir = self.root / "shards"
@@ -543,6 +549,7 @@ class WPCProgressStore:
         self.log_path = self.root / "progress.jsonl"
         self.contract = _json_safe(dict(contract or {}))
         self.contract_fingerprint = _canonical_sha256(self.contract)
+        self.run_id = run_id
 
         if self.manifest_path.is_file():
             existing = load_json_manifest(self.manifest_path, require_dict=True)
@@ -557,7 +564,10 @@ class WPCProgressStore:
             if contract is not None and (
                 str(existing.get("contract_fingerprint", "")) != self.contract_fingerprint
             ):
-                raise ValueError("WP-C progress contract drift detected; refusing resume")
+                raise ValueError(
+                    "WP-C progress contract drift detected; use a new output directory to restart"
+                )
+            self.run_id = str(existing.get("run_id", ""))
         else:
             if resume and self.root.exists() and any(self.root.iterdir()):
                 raise ValueError(
@@ -569,6 +579,7 @@ class WPCProgressStore:
                     "schema_version": PROGRESS_SCHEMA_VERSION,
                     "contract_fingerprint": self.contract_fingerprint,
                     "contract": self.contract,
+                    "run_id": self.run_id,
                     "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 },
                 self.manifest_path,
@@ -778,8 +789,8 @@ def evaluate_wp_c_unit(
     allow_test: bool = False,
     re_split: Optional[ReSplit] = None,
     lock_manifest: Optional[Mapping[str, Any]] = None,
-    require_approved_lock: bool = False,
     allow_example_lock: bool = False,
+    lock_artifact_paths: Optional[Mapping[str, Optional[Path]]] = None,
     protocol_identity: str = "wp_c_protocol",
     split: str = "val",
     re_fold: str = "default",
@@ -788,7 +799,7 @@ def evaluate_wp_c_unit(
     output_scale: str = "nondimensional",
     chunk_size: int = 16384,
     device: Union[str, torch.device] = "cpu",
-    complete_only: bool = False,
+    complete_only: bool = True,
     enable_vorticity: bool = False,
     enable_ssim: bool = False,
     oracle_cache: Optional[Dict[int, EvaluationResult]] = None,
@@ -801,6 +812,7 @@ def evaluate_wp_c_unit(
     comparisons_hash: str = "",
     manifest_hash: str = "",
     noise_scale_sha256: str = "",
+    analysis_lock_sha256: str = "",
 ) -> Dict[str, Any]:
     """Evaluate one WP-C unit across clean/noisy and missing-sensor perturbations.
 
@@ -819,8 +831,8 @@ def evaluate_wp_c_unit(
         re_split=re_split,
         allow_test=allow_test,
         lock_manifest=lock_manifest,
-        require_approved_lock=require_approved_lock,
         allow_example=allow_example_lock,
+        artifact_paths=lock_artifact_paths,
     )
 
     norm_levels = _normalize_noise_levels(noise_levels)
@@ -1065,7 +1077,7 @@ def evaluate_wp_c_unit(
                 "comparisons_hash": comparisons_hash,
                 "manifest_hash": manifest_hash,
                 "noise_scale_sha256": noise_scale_sha256,
-                "analysis_lock_sha256": "",
+                "analysis_lock_sha256": analysis_lock_sha256,
                 "resume_amendment_sha256": "",
                 "model_family": model_family,
                 "model_variant": model_variant,
@@ -1146,7 +1158,7 @@ def evaluate_wp_c_unit(
                 row_re_id=re_id,
                 row_cycle_id="",
                 complete_block=None,
-                n_snaps=int(case.nt),
+                n_snaps=metrics_overall.get("n_snapshots"),
             )
             for pr in per_re_payloads:
                 _emit_rows(
@@ -1368,11 +1380,18 @@ def _load_cases_dict(
     processed_dir: Path,
     re_ids: Sequence[int],
     *,
+    mesh: MeshData,
     allow_test: bool,
     re_split: ReSplit,
 ) -> Dict[int, ReCaseData]:
     enforce_locked_test_re_guard(re_ids, allow_test=allow_test, re_split=re_split)
-    return load_re_cases(processed_dir, re_ids=list(re_ids), require_all=True)
+    return load_re_cases(
+        processed_dir,
+        re_list=re_ids,
+        mesh=mesh,
+        load_field=True,
+        test_guard_split=None if allow_test else re_split,
+    )
 
 
 def _run_noise_scale_stage(
@@ -1435,17 +1454,109 @@ def _run_noise_scale_stage(
     }
 
 
+def _data_fingerprint(data: Union[MeshData, ReCaseData]) -> str:
+    """Fingerprint the actual case data without copying a full field to bytes."""
+    payload = {}
+    for item in fields(data):
+        value = getattr(data, item.name)
+        if isinstance(value, np.ndarray):
+            if value.nbytes <= 16 * 1024**2:
+                payload[item.name] = sha256_array(value)
+            else:
+                rows_per_chunk = max(1, (16 * 1024**2) // value[0].nbytes)
+                payload[item.name] = [
+                    sha256_array(value[start : start + rows_per_chunk])
+                    for start in range(0, value.shape[0], rows_per_chunk)
+                ]
+        else:
+            payload[item.name] = value
+    return _canonical_sha256(payload)
+
+
+def _model_fingerprint(package: Any) -> str:
+    """Bind injected models and checkpoint settings that affect inference."""
+    model = package if isinstance(package, torch.nn.Module) else package.model
+    state = {
+        name: sha256_array(tensor.detach().cpu().numpy())
+        for name, tensor in model.state_dict().items()
+    }
+    options = {
+        name: getattr(model, name)
+        for name in ("D", "re_norm_method", "pool", "candidate_count", "count_feature", "position_encoding")
+        if hasattr(model, name)
+    }
+    if isinstance(package, LegacyPPINNPackage):
+        options.update(rho=package.rho, pressure_scale_mode=package.pressure_scale_mode)
+    elif isinstance(package, (LegacyMLPPackage, DeepSetsPackage, AblationPackage)):
+        options.update(
+            x_normalizer=package.x_normalizer.to_dict(),
+            re_normalizer=package.re_normalizer.to_dict(),
+        )
+        if isinstance(package, LegacyMLPPackage):
+            options["sensor_indices"] = package.sensor_indices
+        else:
+            options["candidate_positions"] = sha256_array(package.candidate_positions)
+            options["default_sensor_indices"] = package.default_sensor_indices
+    return _canonical_sha256({
+        "type": f"{type(model).__module__}.{type(model).__qualname__}",
+        "architecture": repr(model),
+        "state": state,
+        "options": options,
+    })
+
+
+def _bind_encoder_checkpoints(
+    eval_units: List[Dict[str, Any]], *, manifest_dir: Optional[Path],
+) -> None:
+    """Normalize and hash the checkpoint that each evaluation actually opens."""
+    digests: Dict[Path, str] = {}
+    for unit in eval_units:
+        ckpt_raw = unit.get("checkpoint_path") or unit.get("checkpoint")
+        path = _resolve_rel_path(ckpt_raw, base_dir=manifest_dir)
+        if path is None:
+            raise ValueError(f"Unit {unit['unit_id']!r} requires a resolved encoder checkpoint_path")
+        if path not in digests:
+            digests[path] = sha256_file(path)
+        digest = digests[path]
+        declared = unit.get("checkpoint_sha256")
+        if declared and str(declared).lower() != digest:
+            raise ValueError(f"WP-C encoder checkpoint SHA-256 mismatch for unit {unit['unit_id']!r}: {path}")
+        unit["checkpoint_path"] = str(path)
+        unit["checkpoint_sha256"] = digest
+
+
 def _load_encoder_for_unit(unit: Mapping[str, Any], *, device: str) -> Any:
-    ckpt_raw = unit.get("checkpoint_path") or unit.get("checkpoint")
-    if not ckpt_raw:
-        raise ValueError(f"Unit {unit.get('unit_id')!r} missing checkpoint_path and no encoder supplied")
-    ckpt_path = Path(str(ckpt_raw))
+    ckpt_path = Path(unit["checkpoint_path"])
     family = str(unit.get("model_family", "fixed_mlp")).lower()
     if "ablation" in family:
-        return load_ablation_checkpoint(ckpt_path, map_location=device)
-    if "deepsets" in family or "dynamic" in family:
-        return load_deepsets_checkpoint(ckpt_path, map_location=device)
-    return load_legacy_mlp_checkpoint(ckpt_path, map_location=device)
+        package = load_ablation_checkpoint(ckpt_path, map_location=device)
+    elif "deepsets" in family or "dynamic" in family:
+        package = load_deepsets_checkpoint(ckpt_path, map_location=device)
+    else:
+        package = load_legacy_mlp_checkpoint(ckpt_path, map_location=device)
+    if sha256_file(ckpt_path) != unit["checkpoint_sha256"]:
+        raise ValueError(f"WP-C encoder checkpoint changed during evaluation: {ckpt_path}")
+    return package
+
+
+def _check_frozen_wp_c_config(cfg: WPCConfig, lock_payload: Mapping[str, Any]) -> None:
+    """Ensure inline objects cannot replace a protocol or manifest verified on disk."""
+    frozen = lock_payload.get("frozen_artifacts")
+    if not isinstance(frozen, Mapping):
+        return
+    if "protocol_path" in frozen or "protocol_sha256" in frozen:
+        frozen_cfg = load_wp_c_config(cfg.protocol_path)
+        settings = (
+            "protocol", "protocol_id", "re_fold_id", "train_re", "val_re", "test_re",
+            "eval_noise_levels", "eval_noise_seeds", "n_drop", "dropout_prob", "dropout_seed",
+            "impute_mode", "complete_only", "output_scale", "enable_vorticity", "enable_ssim",
+        )
+        changed = [name for name in settings if getattr(cfg, name) != getattr(frozen_cfg, name)]
+        if changed:
+            raise PermissionError(f"WP-C evaluation settings differ from the frozen protocol: {changed}")
+    if "artifact_manifest_path" in frozen or "artifact_manifest_sha256" in frozen:
+        if cfg.manifest != load_json_manifest(cfg.manifest_path):
+            raise PermissionError("WP-C evaluation manifest differs from the frozen manifest")
 
 
 def _run_evaluate_stage(
@@ -1483,15 +1594,32 @@ def _run_evaluate_stage(
     lock_payload: Optional[Mapping[str, Any]] = cfg.analysis_lock or None
     if lock_payload is None and cfg.analysis_lock_path is not None and cfg.analysis_lock_path.is_file():
         lock_payload = load_json_manifest(cfg.analysis_lock_path, require_dict=True)
-    validate_re_split_locked_test_gate(
+    default_ns_path = cfg.output_root / "01_noise_scale" / "wp_c_noise_scale.json"
+    eff_ns_path = next(
+        (path for path in (cfg.noise_scale_path, default_ns_path) if path is not None and path.is_file()),
+        None,
+    )
+    allow_example_lock = cfg.allow_example and eval_cases is not None
+    artifact_paths = (None if eval_cases is not None else {
+        "protocol": cfg.protocol_path,
+        "comparisons": cfg.comparisons_path,
+        "artifact_manifest": cfg.manifest_path if units is None and encoder is None else None,
+        "noise_scale": eff_ns_path if noise_scale_artifact is None else None,
+        "selected_ppinn": cfg.ppinn_checkpoint if ppinn is None else None,
+    })
+    gate = validate_re_split_locked_test_gate(
         target_re_ids,
         re_split=cfg.re_split,
         allow_test=allow_test,
         lock_manifest=lock_payload,
         lock_path=cfg.analysis_lock_path,
-        require_approved_lock=True,
-        allow_example=cfg.allow_example,
+        allow_example=allow_example_lock,
+        artifact_paths=artifact_paths,
     )
+    if artifact_paths is not None and gate["locked_test_re_requested"] and lock_payload is not None:
+        _check_frozen_wp_c_config(cfg, lock_payload)
+    if cfg.formal and not cfg.complete_only:
+        raise ValueError("WP-C formal evaluation requires aggregation over complete shedding cycles")
 
     eval_units: List[Dict[str, Any]] = (
         [dict(u) for u in units]
@@ -1514,6 +1642,10 @@ def _run_evaluate_stage(
                 "model_repeat_id": 0,
             }
         ]
+    for idx, unit in enumerate(eval_units):
+        unit["unit_id"] = str(unit.get("unit_id") or f"unit_{idx}")
+    if len({u["unit_id"] for u in eval_units}) != len(eval_units):
+        raise ValueError("WP-C evaluation unit IDs must be unique")
 
     eval_dir = cfg.output_root / "02_evaluate"
     n_nonzero = sum(1 for lvl in cfg.eval_noise_levels if abs(float(lvl)) > 1e-15)
@@ -1531,7 +1663,13 @@ def _run_evaluate_stage(
             "output_dir": str(eval_dir),
         }
 
-    eval_dir.mkdir(parents=True, exist_ok=True)
+    encoder_fingerprint = ""
+    if encoder is None:
+        manifest_dir = cfg.manifest_path.parent if cfg.manifest_path is not None else None
+        _bind_encoder_checkpoints(eval_units, manifest_dir=manifest_dir)
+    else:
+        encoder_fingerprint = _model_fingerprint(encoder)
+
     resolved_mesh = (
         mesh
         if mesh is not None
@@ -1543,13 +1681,11 @@ def _run_evaluate_stage(
         else _load_cases_dict(
             cfg.processed_dir,
             target_re_ids,
+            mesh=resolved_mesh,
             allow_test=allow_test,
             re_split=cfg.re_split,
         )
     )
-
-    default_ns_path = cfg.output_root / "01_noise_scale" / "wp_c_noise_scale.json"
-    eff_ns_path = cfg.noise_scale_path if (cfg.noise_scale_path is not None and cfg.noise_scale_path.is_file()) else (default_ns_path if default_ns_path.is_file() else None)
 
     resolved_noise_scale: Optional[Mapping[str, Any]] = noise_scale_artifact
     noise_scale_sha = ""
@@ -1571,14 +1707,17 @@ def _run_evaluate_stage(
             raise ValueError("ppinn checkpoint is required when ppinn model object is not provided")
         ppinn_sha = sha256_file(cfg.ppinn_checkpoint)
         resolved_ppinn = load_legacy_ppinn_checkpoint(cfg.ppinn_checkpoint, map_location=cfg.device)
+        if sha256_file(cfg.ppinn_checkpoint) != ppinn_sha:
+            raise ValueError(f"WP-C pPINN checkpoint changed during evaluation: {cfg.ppinn_checkpoint}")
     elif getattr(resolved_ppinn, "checkpoint_path", None):
         cp = Path(str(resolved_ppinn.checkpoint_path))
         if cp.is_file():
             ppinn_sha = sha256_file(cp)
 
-    protocol_hash = sha256_file(cfg.protocol_path) if cfg.protocol_path and cfg.protocol_path.is_file() else _canonical_sha256(cfg.protocol)
-    comparisons_hash = sha256_file(cfg.comparisons_path) if cfg.comparisons_path and cfg.comparisons_path.is_file() else ""
-    manifest_hash = sha256_file(cfg.manifest_path) if cfg.manifest_path and cfg.manifest_path.is_file() else _canonical_sha256(cfg.manifest)
+    protocol_hash = _artifact_sha256(cfg.protocol_path, cfg.protocol)
+    comparisons_hash = _artifact_sha256(cfg.comparisons_path, cfg.comparisons)
+    manifest_hash = _artifact_sha256(cfg.manifest_path, cfg.manifest)
+    lock_sha = _artifact_sha256(cfg.analysis_lock_path, lock_payload)
     cand_fp = candidate_position_fingerprint(positions_from_theta(resolved_mesh.sensor_theta))
     noise_scale_fp = (
         str(resolved_noise_scale.get("channel_stats_fingerprint", ""))
@@ -1586,21 +1725,52 @@ def _run_evaluate_stage(
         else ""
     )
 
-    run_id = make_run_id("wp_c_eval", re_fold_id=cfg.re_fold_id)
+    artifact_hashes = {
+        "protocol": protocol_hash,
+        "comparisons": comparisons_hash,
+        "manifest": manifest_hash,
+        "analysis_lock": lock_sha,
+        "noise_scale": noise_scale_sha,
+        "ppinn_checkpoint": ppinn_sha,
+    }
     contract = {
         "protocol_id": cfg.protocol_id,
-        "protocol_hash": protocol_hash,
-        "manifest_hash": manifest_hash,
-        "noise_scale_fingerprint": noise_scale_fp,
+        "artifacts": artifact_hashes,
+        "lock_payload": _canonical_sha256(lock_payload) if lock_payload else "",
+        "ppinn_fingerprint": _model_fingerprint(resolved_ppinn),
+        "injected_encoder_fingerprint": encoder_fingerprint,
+        "mesh_fingerprint": _data_fingerprint(resolved_mesh),
+        "case_fingerprints": [_data_fingerprint(case) for _, case in _normalize_cases_input(resolved_cases)],
         "split": eval_split,
         "re_ids": target_re_ids,
+        "re_fold_id": cfg.re_fold_id,
+        "re_split": {"train": cfg.train_re, "val": cfg.val_re, "test": cfg.test_re},
+        "allow_test": allow_test,
         "noise_levels": list(cfg.eval_noise_levels),
         "noise_seeds": list(cfg.eval_noise_seeds),
+        "noise_seed_derivation": SEED_DERIVATION_VERSION,
+        "noise_bit_generator": BIT_GENERATOR_NAME,
         "n_drop": cfg.n_drop,
         "dropout_prob": cfg.dropout_prob,
-        "unit_ids": [str(u.get("unit_id", i)) for i, u in enumerate(eval_units)],
+        "dropout_seed": cfg.dropout_seed,
+        "impute_mode": cfg.impute_mode,
+        "output_scale": cfg.output_scale,
+        "complete_only": cfg.complete_only,
+        "enable_vorticity": cfg.enable_vorticity,
+        "enable_ssim": cfg.enable_ssim,
+        "device": cfg.device,
+        "chunk_size": cfg.chunk_size,
+        "selection_data_domain": cfg.selection_data_domain,
+        "smoke_not_for_formal": cfg.smoke_not_for_formal,
+        "units": eval_units,
     }
-    store = WPCProgressStore(eval_dir, contract=contract, resume=resume)
+    store = WPCProgressStore(
+        eval_dir,
+        contract=contract,
+        resume=resume,
+        run_id=make_run_id("wp_c_eval", re_fold_id=cfg.re_fold_id),
+    )
+    run_id = store.run_id
 
     oracle_cache: Dict[int, EvaluationResult] = {}
     z_cache: Dict[Tuple[int, int], np.ndarray] = {}
@@ -1610,8 +1780,8 @@ def _run_evaluate_stage(
     skipped_resume = 0
     evaluated_now = 0
 
-    for idx_u, unit in enumerate(eval_units):
-        uid = str(unit.get("unit_id") or f"unit_{idx_u}")
+    for unit in eval_units:
+        uid = unit["unit_id"]
         if resume and store.has(uid):
             cached = store.load(uid)
             unit_summaries.append(cached)
@@ -1649,8 +1819,8 @@ def _run_evaluate_stage(
             allow_test=allow_test,
             re_split=cfg.re_split,
             lock_manifest=lock_payload,
-            require_approved_lock=True,
-            allow_example_lock=cfg.allow_example,
+            allow_example_lock=allow_example_lock,
+            lock_artifact_paths=artifact_paths,
             protocol_identity=cfg.protocol_id,
             split=eval_split,
             re_fold=cfg.re_fold_id,
@@ -1672,6 +1842,7 @@ def _run_evaluate_stage(
             comparisons_hash=comparisons_hash,
             manifest_hash=manifest_hash,
             noise_scale_sha256=noise_scale_sha,
+            analysis_lock_sha256=lock_sha,
         )
         store.save(uid, res)
         unit_summaries.append(res)
@@ -1702,6 +1873,7 @@ def _run_evaluate_stage(
         "re_ids": target_re_ids,
         "noise_levels": list(cfg.eval_noise_levels),
         "noise_seeds": list(cfg.eval_noise_seeds),
+        "complete_only": cfg.complete_only,
         "expected_cells": expected_cells,
         "cells": plan_cells,
     }
@@ -1720,12 +1892,7 @@ def _run_evaluate_stage(
         "units_resumed": skipped_resume,
         "candidate_position_fingerprint": cand_fp,
         "noise_scale_fingerprint": noise_scale_fp,
-        "artifact_hashes": {
-            "protocol": protocol_hash,
-            "comparisons": comparisons_hash,
-            "manifest": manifest_hash,
-            "noise_scale": noise_scale_sha,
-        },
+        "artifact_hashes": artifact_hashes,
     }
     _write_json_atomic(summary_payload, eval_dir / "wp_c_robustness_summary.json")
 
@@ -1755,10 +1922,14 @@ def _run_evaluate_stage(
             "comparisons_sha256": comparisons_hash,
             "manifest_sha256": manifest_hash,
             "noise_scale_sha256": noise_scale_sha,
+            "analysis_lock_sha256": lock_sha,
+            "ppinn_checkpoint_sha256": ppinn_sha,
+            "progress_contract_fingerprint": store.contract_fingerprint,
             "noise_scale_fingerprint": noise_scale_fp,
             "candidate_position_fingerprint": cand_fp,
             "noise_levels": list(cfg.eval_noise_levels),
             "noise_seeds": list(cfg.eval_noise_seeds),
+            "complete_only": cfg.complete_only,
             "seed_derivation_version": SEED_DERIVATION_VERSION,
             "bit_generator": BIT_GENERATOR_NAME,
             "expected_cells": expected_cells,

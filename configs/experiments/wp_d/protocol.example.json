@@ -1,5 +1,5 @@
 {
-  "_comment": "Sanitized WP-D example protocol configuration (relative paths only, not for formal claims).",
+  "_comment": "Sanitized WP-D example protocol. Supply the WP-D artifact manifest with exact evaluation_units for both matrices before evaluation.",
   "schema_version": "wp_d_protocol_v0",
   "work_package": "wp_d",
   "protocol_id": "wp_d_reconstruction_physics_example_v1",
@@ -13,9 +13,7 @@
   "fold": "default",
   "paths": {
     "output_root": "./runs/wp_d",
-    "ppinn_checkpoint": "./runs/pinn_runs/best_ppinn.pt",
-    "encoder_checkpoint": "./runs/mlp_runs/best_model.pt",
-    "pod_checkpoint": "./runs/pod_runs/pod_model.npz",
+    "artifact_manifest_path": "./runs/wp_d/wp_d_artifact_manifest.json",
     "comparisons_path": "./configs/experiments/wp_d/comparisons.example.json",
     "analysis_lock_path": "./configs/experiments/wp_d/analysis_lock.example.json",
     "ssim_scale_path": "./runs/wp_d/frozen_metrics/ssim_scale_artifact.json",

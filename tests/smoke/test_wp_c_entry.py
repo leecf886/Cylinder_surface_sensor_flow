@@ -553,6 +553,19 @@ def test_wp_c_progress_store_and_full_stage_dispatch(tmp_path: Path) -> None:
     assert resume_res["results"]["evaluate"]["units_evaluated"] == 0
     assert resume_res["results"]["evaluate"]["units_resumed"] == 2
 
+    with torch.no_grad():
+        next(ppinn.model.parameters()).add_(0.1)
+    with pytest.raises(ValueError, match="contract drift"):
+        run_wp_c(
+            cfg,
+            stages=("evaluate",),
+            resume=True,
+            eval_cases=val_cases,
+            mesh=mesh,
+            ppinn=ppinn,
+            units=units,
+        )
+
     # Check stage_executors injection
     called: List[str] = []
     inj_res = run_wp_c(
@@ -562,3 +575,109 @@ def test_wp_c_progress_store_and_full_stage_dispatch(tmp_path: Path) -> None:
     )
     assert called == ["preflight"]
     assert inj_res["results"]["preflight"] == {"ok": True}
+
+
+def test_wp_c_file_resume_rejects_changed_inputs(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    from cylinder_flow.artifacts.checkpoints import save_mlp_checkpoint, save_ppinn_checkpoint
+    from cylinder_flow.cli import main
+    from cylinder_flow.data.h5 import save_mesh, save_re_case
+
+    mesh = _make_synthetic_mesh()
+    case = _make_synthetic_case(450)
+    case.phase = np.mod(case.phase + np.pi, 2.0 * np.pi)
+    case.phase_sin = np.sin(case.phase)
+    case.phase_cos = np.cos(case.phase)
+    save_mesh(tmp_path / "mesh.h5", mesh)
+    case_path = tmp_path / "Re450.h5"
+    save_re_case(case_path, case)
+
+    ppinn = _make_tiny_ppinn().model
+    ppinn_path = tmp_path / "ppinn.pt"
+    save_ppinn_checkpoint(ppinn_path, ppinn, save_config_json=False)
+    mlp = _make_tiny_mlp()
+    encoder_path = tmp_path / "encoder.pt"
+
+    def save_encoder() -> None:
+        save_mlp_checkpoint(encoder_path, mlp.model, mlp.x_normalizer, mlp.re_normalizer, mlp.sensor_indices)
+
+    save_encoder()
+    (tmp_path / "manifest.json").write_text(json.dumps({"evaluation_units": [{
+        "unit_id": "run_0",
+        "checkpoint_path": encoder_path.name,
+        "model_family": "fixed_mlp",
+    }]}), encoding="utf-8")
+    protocol_path = tmp_path / "protocol.json"
+    protocol_path.write_text(json.dumps({
+        "processed_dir": str(tmp_path),
+        "output_root": str(tmp_path / "out"),
+        "ppinn_checkpoint": ppinn_path.name,
+        "manifest_path": "manifest.json",
+        "eval_noise_levels": [0.0],
+        "val_re": [450],
+    }), encoding="utf-8")
+    args = ["wp-c", "--config", str(protocol_path), "--stages", "evaluate"]
+
+    assert main(args) == 0
+    original = json.loads(capsys.readouterr().out)["results"]["evaluate"]
+    assert original["re_ids"] == [450]
+    assert original["units_evaluated"] == 1
+    metrics_path = Path(original["metrics_path"])
+    with metrics_path.open(encoding="utf-8", newline="") as handle:
+        overall = next(row for row in csv.DictReader(handle) if row["granularity"] == "overall")
+    assert int(overall["n_snapshots"]) == 12
+    original_metrics = metrics_path.read_bytes()
+
+    assert main([*args, "--resume"]) == 0
+    resumed = json.loads(capsys.readouterr().out)["results"]["evaluate"]
+    assert resumed["units_evaluated"] == 0
+    assert resumed["units_resumed"] == 1
+    assert resumed["run_id"] == original["run_id"]
+    assert metrics_path.read_bytes() == original_metrics
+
+    original_ppinn = ppinn_path.read_bytes()
+    with torch.no_grad():
+        next(ppinn.parameters()).add_(0.1)
+    save_ppinn_checkpoint(ppinn_path, ppinn, save_config_json=False)
+    with pytest.raises(ValueError, match="contract drift"):
+        main([*args, "--resume"])
+    ppinn_path.write_bytes(original_ppinn)
+
+    original_encoder = encoder_path.read_bytes()
+    with torch.no_grad():
+        next(mlp.model.parameters()).add_(0.1)
+    save_encoder()
+    with pytest.raises(ValueError, match="contract drift"):
+        main([*args, "--resume"])
+    encoder_path.write_bytes(original_encoder)
+
+    case.field_uvp[0, 0, 0] += 0.1
+    save_re_case(case_path, case)
+    with pytest.raises(ValueError, match="contract drift"):
+        main([*args, "--resume"])
+    assert metrics_path.read_bytes() == original_metrics
+
+
+def test_wp_c_frozen_checkpoint_checks_precede_data_access(tmp_path: Path) -> None:
+    frozen = tmp_path / "frozen.pt"
+    frozen.write_bytes(b"approved checkpoint")
+    actual = tmp_path / "other.pt"
+    actual.write_bytes(b"different checkpoint")
+    cfg = WPCConfig(
+        data_root=tmp_path,
+        processed_dir=tmp_path,
+        runs_dir=tmp_path,
+        output_root=tmp_path / "run",
+        ppinn_checkpoint=actual,
+        analysis_lock={
+            "schema_version": "wp_c_analysis_lock_record_v1",
+            "approval_status": "approved",
+            "example_not_formal": False,
+            "confirmatory_claims_allowed": False,
+            "frozen_artifacts": {
+                "selected_ppinn_path": str(frozen),
+                "selected_ppinn_sha256": sha256_file(frozen),
+            },
+        },
+    )
+    with pytest.raises(PermissionError, match="selected_ppinn"):
+        run_wp_c(cfg, stages=("evaluate",), allow_test=True)

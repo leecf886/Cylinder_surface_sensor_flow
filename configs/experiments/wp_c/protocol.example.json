@@ -5,6 +5,7 @@
   "example_not_formal": true,
   "claim_classification": "descriptive_secondary_analysis_after_prior_test_reuse",
   "confirmatory_claims_allowed": false,
+  "complete_only": true,
   "description": "WP-C formal-experiment readiness protocol (EXAMPLE/DRAFT). Defines clean-trained encoder robustness under synthetic Gaussian eval noise, fixed-MLP vs shared DeepSets pairing, long-table provenance, and formal gates. Not approved; placeholders must be resolved by the owner before formal execution.",
   "frozen_prior_work_packages": {
     "wp_a_is_historical_record": true,

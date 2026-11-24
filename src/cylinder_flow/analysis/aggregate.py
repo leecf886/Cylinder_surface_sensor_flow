@@ -161,6 +161,7 @@ WP_D_RESULTS_COLUMNS: List[str] = [
     "run_id",
     "stage",
     "protocol_id",
+    "experiment_id",
     "protocol_hash",
     "comparisons_hash",
     "manifest_hash",
@@ -1370,6 +1371,8 @@ def _derive_wp_b_checkpoint_path(run_meta: Mapping[str, Any]) -> Optional[Path]:
 
 def _wp_b_model_family(model_variant: str, encoder: str) -> str:
     mv = str(model_variant).lower()
+    if mv.startswith("arch_") or encoder == "dynamic_arch_ablation":
+        return "dynamic_arch_ablation"
     if "deepsets_dynamic" in mv or encoder == "deepsets_dynamic":
         return "deepsets_dynamic"
     if "deepsets" in mv or encoder == "deepsets":
@@ -1470,7 +1473,7 @@ def _augment_wp_b_rows(
 
         model_variant = str(row.get("model_variant", ""))
         encoder = row_ckpt_meta.encoder if row_ckpt_meta is not None else ""
-        row["model_family"] = _wp_b_model_family(model_variant, encoder)
+        row["model_family"] = row.get("model_family") or _wp_b_model_family(model_variant, encoder)
         row["strategy_layout_source"] = row.get("strategy", "wp_b_holdout")
         row["model_repeat_id"] = _safe_int(
             row.get("model_repeat_id")
@@ -2406,7 +2409,7 @@ def _augment_wp_d_rows(
             r["re_fold"] = re_fold
         if not r.get("run_id"):
             r["run_id"] = run_id
-        r["protocol_id"] = ""
+        r.setdefault("protocol_id", "")
         r["protocol_hash"] = protocol_hash
         r["comparisons_hash"] = comparisons_hash
         r["manifest_hash"] = manifest_hash

@@ -234,6 +234,9 @@ python -m cylinder_flow train-ppinn --output-dir runs/ppinn_smoke --epochs 1 --s
 python -m cylinder_flow eval --mode closed_loop --ppinn-ckpt examples/checkpoints/ppinn/best_ppinn.pt --encoder-ckpt examples/checkpoints/deepsets/best_model.pt --re-list 450,800 --dry-run
 ```
 
+For the standalone `eval` command, held-out evaluation requires both `--allow-test` and `--analysis-lock PATH`.
+The evaluation runners aggregate per-Re and overall metrics from complete shedding cycles by default.
+
 On Windows PowerShell, thin wrappers under `scripts/windows/` forward arguments directly to `python -m cylinder_flow` with a configurable `-PythonExe` (defaulting to `python`):
 
 ```powershell

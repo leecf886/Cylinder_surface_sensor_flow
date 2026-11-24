@@ -78,8 +78,11 @@ def _load_historical_855a2c1_module():
     """Extract and import encoder_deepset.py from git commit 855a2c1."""
     if not OLD_REPO_PATH.exists():
         return None
+    git_dir = OLD_REPO_PATH / ".git"
+    # Read the history without asking Git to change into an external worktree.
+    git_location = [f"--git-dir={git_dir}"] if git_dir.is_dir() else ["-C", str(OLD_REPO_PATH)]
     try:
-        cmd = ["git", "-C", str(OLD_REPO_PATH), "show", "855a2c1:encoder_deepset.py"]
+        cmd = ["git", *git_location, "show", "855a2c1:encoder_deepset.py"]
         src = subprocess.check_output(cmd, encoding="utf-8", stderr=subprocess.DEVNULL)
     except Exception:
         return None

@@ -286,3 +286,46 @@ def test_pipeline_subcommands_dry_run_precedence_and_guards(
     assert tp_out["status"] == "dry_run"
     assert tp_out["epochs"] == 4
     assert tp_out["lambda_phys"] == pytest.approx(0.5)
+
+
+def test_cli_eval_checks_analysis_lock_before_loading_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from cylinder_flow.artifacts.manifests import sha256_file
+
+    def unexpected_load(*args: object, **kwargs: object) -> None:
+        pytest.fail("a rejected evaluation must stop before loading HDF5")
+
+    monkeypatch.setattr("cylinder_flow.data.h5.load_mesh", unexpected_load)
+    monkeypatch.setattr("cylinder_flow.data.h5.load_re_cases", unexpected_load)
+    args = ["eval", "--re-list", "250,650", "--allow-test"]
+    with pytest.raises(PermissionError, match="approved lock"):
+        cli_main(args)
+
+    lock_path = tmp_path / "lock.json"
+    model_path = tmp_path / "frozen.pt"
+    model_path.write_bytes(b"frozen checkpoint")
+    lock = {
+        "approval_status": "pending",
+        "frozen_artifacts": {
+            "selected_ppinn_path": str(model_path),
+            "selected_ppinn_sha256": sha256_file(model_path),
+        },
+    }
+    args += ["--analysis-lock", str(lock_path)]
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+    with pytest.raises(PermissionError, match="not_approved"):
+        cli_main(args)
+
+    lock["approval_status"] = "approved"
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+    assert cli_main([*args, "--dry-run"]) == 0
+    assert json.loads(capsys.readouterr().out)["split"] == "test"
+    other_model = tmp_path / "other.pt"
+    other_model.write_bytes(b"different checkpoint")
+    with pytest.raises(PermissionError, match="hash_mismatch"):
+        cli_main([*args, "--ppinn-ckpt", str(other_model)])
+
+    model_path.write_bytes(b"changed checkpoint")
+    with pytest.raises(PermissionError, match="hash_mismatch"):
+        cli_main(args)

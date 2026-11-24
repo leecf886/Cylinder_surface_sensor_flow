@@ -159,7 +159,7 @@ class EvaluationResult:
     cycle_info_by_re: Dict[int, Dict[str, Any]] = field(default_factory=dict)
     re_ids: List[int] = field(default_factory=list)
     allow_test: bool = False
-    complete_only: bool = False
+    complete_only: bool = True
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -359,10 +359,13 @@ def _evaluate_case_fields_and_cycles(
     if not (np.all(np.isfinite(pred)) and np.all(np.isfinite(true))):
         raise ValueError(f"Re={re_id}: non-finite values in pred or true flow field")
 
+    ci = detect_cycles_from_phase(case.phase, time=case.time)
+    if complete_only and not ci.n_complete:
+        raise ValueError(f"Re={re_id}: no complete shedding cycles for field metrics")
+
     raws: List[RawSnapshotAccum] = [
         build_raw_snapshot_accum(pred[t], true[t]) for t in range(case.nt)
     ]
-    ci = detect_cycles_from_phase(case.phase, time=case.time)
     pc_rows = per_cycle_field_metrics(raws, ci)
 
     for row in pc_rows:
@@ -482,7 +485,7 @@ def evaluate_ppinn_oracle(
     output_scale: str = "nondimensional",
     chunk_size: int = 16384,
     device: Union[str, torch.device] = "cpu",
-    complete_only: bool = False,
+    complete_only: bool = True,
     enable_vorticity: bool = False,
     enable_ssim: bool = False,
     ssim_scale_artifact: Optional[MeshLocalSSIMScaleArtifact] = None,
@@ -772,7 +775,7 @@ def evaluate_closed_loop_pipeline(
     output_scale: str = "nondimensional",
     chunk_size: int = 16384,
     device: Union[str, torch.device] = "cpu",
-    complete_only: bool = False,
+    complete_only: bool = True,
     enable_vorticity: bool = False,
     enable_ssim: bool = False,
     ssim_scale_artifact: Optional[MeshLocalSSIMScaleArtifact] = None,
@@ -980,7 +983,7 @@ def evaluate_pod_baseline(
     output_scale: str = "nondimensional",
     rho: float = 1000.0,
     pressure_scale_mode: str = "rho_uinf2",
-    complete_only: bool = False,
+    complete_only: bool = True,
     enable_vorticity: bool = False,
     enable_ssim: bool = False,
     ssim_scale_artifact: Optional[MeshLocalSSIMScaleArtifact] = None,

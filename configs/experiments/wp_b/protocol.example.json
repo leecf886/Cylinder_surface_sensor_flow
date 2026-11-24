@@ -18,7 +18,10 @@
   "paths": {
     "output_root": "./runs/wp_b",
     "layout_manifest_path": "./configs/experiments/wp_b/layout_holdout.example.json",
-    "ppinn_checkpoint": "./runs/wp_a/ppinn_selection/best_ppinn.pt"
+    "ppinn_checkpoint": "./runs/wp_a/ppinn_selection/best_ppinn.pt",
+    "shared_checkpoints": [],
+    "specialized_manifest": null,
+    "lock_path": null
   },
   "re_split": {
     "re_fold_id": "default",
@@ -52,10 +55,16 @@
     "base_seed": 42,
     "model_repeat_ids": [0, 1, 2, 3, 4]
   },
+  "exact_k_dropout": {
+    "inference_dropout": true,
+    "failure_seeds": [0, 1, 2, 3, 4],
+    "evaluation_budgets": [6, 12, 24, 48]
+  },
   "training": {
     "num_epochs": 200,
     "batch_size": 512,
-    "training_sensor_counts": [6, 12, 24, 48]
+    "training_sensor_counts": [6, 12, 24, 48],
+    "train_specialized": true
   },
   "statistical_protocol": {
     "n_bootstrap": 5000,

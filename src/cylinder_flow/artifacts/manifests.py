@@ -441,21 +441,19 @@ def validate_re_split_locked_test_gate(
     allow_test: bool = False,
     lock_manifest: Optional[Mapping[str, Any]] = None,
     lock_path: Optional[Union[str, Path]] = None,
-    require_approved_lock: bool = True,
     allow_example: bool = False,
+    artifact_paths: Optional[Mapping[str, Optional[Union[str, Path]]]] = None,
 ) -> Dict[str, Any]:
     """Block access to locked test Reynolds numbers (default 250/650) unless authorized.
 
-    Access to any Re in ``test_re`` (or ``re_split.test_re``) raises
-    ``PermissionError`` unless ``allow_test=True`` AND (when
-    ``require_approved_lock=True``) an approved, placeholder-free lock/gate
-    manifest is supplied.
+    Access to any locked Re raises ``PermissionError`` unless explicit consent
+    and an approved lock are supplied. Verify frozen artifacts when declared,
+    using the actual input path for any declared role in ``artifact_paths``.
     """
+    locked_set = set(DEFAULT_LOCKED_TEST_RE) | {int(x) for x in test_re}
     if re_split is not None:
         re_split.validate_disjoint(strict=True)
-        locked_set = {int(x) for x in re_split.test_re}
-    else:
-        locked_set = {int(x) for x in test_re}
+        locked_set.update(int(x) for x in re_split.test_re)
 
     requested = [int(x) for x in re_ids]
     locked_hits = sorted(set(requested) & locked_set)
@@ -475,33 +473,32 @@ def validate_re_split_locked_test_gate(
             "and an approved analysis lock/gate."
         )
 
-    if require_approved_lock:
-        resolved_lock: Optional[Mapping[str, Any]] = lock_manifest
+    resolved_lock = lock_manifest
+    try:
         if resolved_lock is None and lock_path is not None:
             resolved_lock = load_json_manifest(lock_path, require_dict=True)
         if resolved_lock is None:
-            raise PermissionError(
-                f"Locked test Re {locked_hits} access requires an approved lock/gate manifest."
-            )
-        try:
-            require_approved_status(
-                resolved_lock,
-                allow_example=allow_example,
-                context="test_gate_lock",
-            )
-            validate_no_placeholder_paths(
-                resolved_lock,
-                strict=True,
-                context="test_gate_lock",
-            )
-        except ValueError as exc:
-            raise PermissionError(
-                f"Locked test Re {locked_hits} blocked by test gate lock: {exc}"
-            ) from exc
-        if resolved_lock.get("confirmatory_claims_allowed") is True:
-            raise PermissionError(
-                f"Locked test Re {locked_hits} gate rejects confirmatory_claims_allowed=true."
-            )
+            raise ValueError("an approved lock/gate manifest is required")
+        frozen = resolved_lock.get("frozen_artifacts")
+        runtime_paths: Dict[str, Union[str, Path]] = {}
+        if isinstance(frozen, Mapping):
+            for role, path in (artifact_paths or {}).items():
+                if f"{role}_path" not in frozen and f"{role}_sha256" not in frozen:
+                    continue
+                if path is None:
+                    raise ValueError(f"the evaluation must use a frozen file for {role!r}")
+                runtime_paths[role] = path
+        validate_analysis_lock(
+            resolved_lock,
+            open_reused_test=True,
+            allow_example=allow_example,
+            artifact_paths=runtime_paths,
+            verify_file_hashes="frozen_artifacts" in resolved_lock,
+        )
+    except (OSError, ValueError) as exc:
+        raise PermissionError(
+            f"Locked test Re {locked_hits} blocked by test gate lock: {exc}"
+        ) from exc
 
     return {
         "allowed": True,

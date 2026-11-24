@@ -18,7 +18,9 @@
   "paths": {
     "output_root": "./runs/wp_b_arch_ablation",
     "layout_manifest_path": "./configs/experiments/wp_b/layout_holdout.example.json",
-    "ppinn_checkpoint": "./runs/wp_a/ppinn_selection/best_ppinn.pt"
+    "ppinn_checkpoint": "./runs/wp_a/ppinn_selection/best_ppinn.pt",
+    "shared_checkpoints": [],
+    "lock_path": null
   },
   "re_split": {
     "re_fold_id": "default",

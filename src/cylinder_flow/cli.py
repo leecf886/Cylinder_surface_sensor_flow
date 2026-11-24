@@ -134,6 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ev.add_argument("--device", type=str, default="cpu")
     p_ev.add_argument("--chunk-size", type=int, default=16384)
     p_ev.add_argument("--allow-test", action="store_true")
+    p_ev.add_argument("--analysis-lock", type=Path, help="Approved analysis lock for held-out test Re")
     p_ev.add_argument("--dry-run", action="store_true")
 
     return parser
@@ -252,11 +253,11 @@ def _dispatch_eval(args: argparse.Namespace, path_cfg: PathConfig) -> Dict[str, 
         load_legacy_mlp_checkpoint,
         load_legacy_ppinn_checkpoint,
     )
+    from cylinder_flow.artifacts.manifests import validate_re_split_locked_test_gate
     from cylinder_flow.artifacts.results import write_metrics_long
     from cylinder_flow.data.h5 import load_mesh, load_re_cases
     from cylinder_flow.data.splits import select_re_fold
     from cylinder_flow.evaluation.runner import (
-        enforce_locked_test_re_guard,
         evaluate_cases_to_long_rows,
         evaluate_closed_loop_pipeline,
         evaluate_pod_baseline,
@@ -266,7 +267,23 @@ def _dispatch_eval(args: argparse.Namespace, path_cfg: PathConfig) -> Dict[str, 
 
     split = select_re_fold(args.fold, strict=False)
     re_ids = _parse_int_csv(args.re_list) or (split.test_re if args.allow_test else split.val_re)
-    enforce_locked_test_re_guard(re_ids, allow_test=bool(args.allow_test), re_split=split)
+    checkpoints = {"pod": args.pod_ckpt} if args.mode == "pod" else {
+        "ppinn": args.ppinn_ckpt,
+        "selected_ppinn": args.ppinn_ckpt,
+        "encoder": args.encoder_ckpt if args.mode == "closed_loop" else None,
+    }
+    gate = validate_re_split_locked_test_gate(
+        re_ids,
+        re_split=split,
+        allow_test=args.allow_test,
+        lock_path=args.analysis_lock,
+        artifact_paths={role: path for role, path in checkpoints.items() if path is not None},
+    )
+    locked_re = set(gate["locked_test_re_requested"])
+    is_test = bool(locked_re)
+    if is_test and set(re_ids) != locked_re:
+        raise ValueError("Evaluate test and non-test Reynolds numbers in separate runs")
+    split_label = "test" if is_test else "val"
 
     out_dir = Path(args.output_dir).resolve() if args.output_dir else path_cfg.runs_dir / "eval"
     if args.dry_run:
@@ -277,9 +294,19 @@ def _dispatch_eval(args: argparse.Namespace, path_cfg: PathConfig) -> Dict[str, 
             "fold": split.fold_id,
             "re_ids": list(re_ids),
             "allow_test": bool(args.allow_test),
+            "split": split_label,
             "processed_dir": str(path_cfg.processed_dir),
             "output_dir": str(out_dir),
         }
+
+    required = {
+        "oracle": {"--ppinn-ckpt": args.ppinn_ckpt},
+        "closed_loop": {"--ppinn-ckpt": args.ppinn_ckpt, "--encoder-ckpt": args.encoder_ckpt},
+        "pod": {"--pod-ckpt": args.pod_ckpt},
+    }
+    missing = [flag for flag, path in required[args.mode].items() if not path]
+    if missing:
+        raise ValueError(f"eval --mode {args.mode} requires {', '.join(missing)}")
 
     mesh = load_mesh(path_cfg.processed_dir / args.mesh_file)
     cases = load_re_cases(
@@ -287,26 +314,21 @@ def _dispatch_eval(args: argparse.Namespace, path_cfg: PathConfig) -> Dict[str, 
         re_ids,
         mesh=mesh,
         load_field=True,
-        test_guard_split=None if args.allow_test else split,
+        test_guard_split=None if is_test else split,
     )
-    split_label = "test" if args.allow_test else "val"
 
     if args.mode == "oracle":
-        if not args.ppinn_ckpt:
-            raise ValueError("--ppinn-ckpt is required for eval --mode oracle")
         ppinn = load_legacy_ppinn_checkpoint(args.ppinn_ckpt, map_location=args.device)
         res = evaluate_ppinn_oracle(
             ppinn,
             cases,
             mesh,
-            allow_test=bool(args.allow_test),
+            allow_test=is_test,
             re_split=split,
             chunk_size=int(args.chunk_size),
             device=args.device,
         )
     elif args.mode == "closed_loop":
-        if not args.ppinn_ckpt or not args.encoder_ckpt:
-            raise ValueError("--ppinn-ckpt and --encoder-ckpt are required for eval --mode closed_loop")
         ppinn = load_legacy_ppinn_checkpoint(args.ppinn_ckpt, map_location=args.device)
         enc_path = Path(args.encoder_ckpt)
         encoder: Any
@@ -322,20 +344,18 @@ def _dispatch_eval(args: argparse.Namespace, path_cfg: PathConfig) -> Dict[str, 
             ppinn,
             cases,
             mesh,
-            allow_test=bool(args.allow_test),
+            allow_test=is_test,
             re_split=split,
             chunk_size=int(args.chunk_size),
             device=args.device,
         )
     else:
-        if not args.pod_ckpt:
-            raise ValueError("--pod-ckpt is required for eval --mode pod")
         pod_model = SurfacePOD.load(args.pod_ckpt)
         res = evaluate_pod_baseline(
             pod_model,
             cases,
             mesh=mesh,
-            allow_test=bool(args.allow_test),
+            allow_test=is_test,
             re_split=split,
         )
 

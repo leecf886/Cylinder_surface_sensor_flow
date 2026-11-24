@@ -14,6 +14,8 @@
     "protocol_sha256": "<PLACEHOLDER_PROTOCOL_SHA256>",
     "comparisons_path": "./configs/experiments/wp_d/comparisons.example.json",
     "comparisons_sha256": "<PLACEHOLDER_COMPARISONS_SHA256>",
+    "artifact_manifest_path": "./runs/wp_d/wp_d_artifact_manifest.json",
+    "artifact_manifest_sha256": "<PLACEHOLDER_ARTIFACT_MANIFEST_SHA256>",
     "ssim_scale_path": "./runs/wp_d/frozen_metrics/ssim_scale_artifact.json",
     "ssim_scale_sha256": "<PLACEHOLDER_SSIM_SCALE_SHA256>",
     "physics_design_path": "./runs/wp_d/frozen_metrics/physics_design_val.npz",
@@ -37,6 +39,9 @@
     "approver": null,
     "approved_utc": null,
     "notes": "Template only. Replace placeholders and set approval_status='approved' only after owner sign-off."
+  },
+  "owner_authorizations": {
+    "open_reused_test": false
   },
   "forbidden": [
     "auto_approve_by_code",
