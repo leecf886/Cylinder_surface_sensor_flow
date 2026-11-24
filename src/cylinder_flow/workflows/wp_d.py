@@ -1797,7 +1797,7 @@ def _build_manifest_wake_operator(mesh: MeshData, audit: Mapping[str, Any]) -> U
     if (operator.n_retained, operator.n_invalid) != (int(audit["n_retained"]), int(audit["n_invalid"])):
         raise ValueError("WP-D wake operator retained stencils do not match the frozen operator audit")
     # Historical hashes also included the draft-status flag and condition-number
-    # roundoff. Publish the actual migrated operator fingerprint in the long table.
+    # roundoff. Publish the actual operator fingerprint in the long table.
     return operator
 
 

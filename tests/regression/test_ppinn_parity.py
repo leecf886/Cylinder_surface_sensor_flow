@@ -1,4 +1,4 @@
-"""Regression and numerical parity tests for Stage 5: pPINN inference & flow field reconstruction."""
+"""Regression and numerical consistency tests for pPINN inference & flow field reconstruction."""
 from __future__ import annotations
 
 import math
@@ -276,7 +276,7 @@ class TestPPINNParityRe450ValidationCase(unittest.TestCase):
                 ref_pred[idx_out] = out_tensor.detach().cpu().numpy()
 
         max_err = float(np.max(np.abs(pred_new - ref_pred)))
-        self.assertLess(max_err, 1e-5, f"Oracle reconstruction error {max_err} exceeds 1e-5 required by REFACTOR.md")
+        self.assertLess(max_err, 1e-5, f"Oracle reconstruction error {max_err} exceeds tolerance 1e-5")
 
         # Verify physical sanity
         self.assertTrue(np.all(np.isfinite(pred_new)), "Predicted field contains NaN or Inf")

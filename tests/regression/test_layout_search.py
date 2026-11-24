@@ -1,4 +1,4 @@
-"""Regression and contract tests for Phase 9 layout scoring and greedy search."""
+"""Regression and contract tests for layout scoring and greedy search."""
 from __future__ import annotations
 
 import copy

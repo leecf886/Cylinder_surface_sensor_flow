@@ -399,7 +399,7 @@ def validate_ppinn_for_layout_search(
 
     Verifies physics compatibility and rejects any pPINN ``train_re`` overlapping
     validation or locked test Re. Full ``ppinn_selection_manifest.json`` SHA
-    auditing stays in Phase 10a evaluation.
+    auditing is handled in the evaluation manifest layer.
     """
     if not isinstance(ppinn_pkg, LegacyPPINNPackage):
         raise TypeError(f"Expected LegacyPPINNPackage, got {type(ppinn_pkg).__name__}")

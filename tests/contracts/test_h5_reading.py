@@ -173,14 +173,14 @@ class TestCaseH5Contract(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 load_re_cases(tmppath, re_list=[200, 250], test_guard_split=split)
 
-    def test_real_workstation_re200_if_available(self):
-        """Integration test with external local workstation data when present."""
+    def test_real_dataset_re200_if_available(self):
+        """Integration test with external processed HDF5 data when present."""
         path_cfg = get_path_config()
         re200_path = path_cfg.processed_dir / "Re200.h5"
         mesh_path = path_cfg.processed_dir / "mesh.h5"
 
         if not re200_path.is_file():
-            self.skipTest(f"External workstation file {re200_path} not found. Skipping real data check.")
+            self.skipTest(f"External dataset file {re200_path} not found. Skipping real data check.")
 
         mesh = load_mesh(mesh_path) if mesh_path.is_file() else None
 

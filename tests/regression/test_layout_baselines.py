@@ -1,4 +1,4 @@
-"""Portable regression and parity tests for Phase 9 baseline layout strategies."""
+"""Portable regression and consistency tests for baseline layout strategies."""
 from __future__ import annotations
 
 import math

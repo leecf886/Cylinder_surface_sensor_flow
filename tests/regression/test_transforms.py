@@ -125,8 +125,10 @@ class TestPhaseTransforms(unittest.TestCase):
         self.assertEqual(info.n_complete, 1)
 
     def test_detect_cycles_re300_real_dataset_if_available(self):
-        # Real Re300 case check on local workstation
-        re300_path = Path("E:/2d_cylinder_flow_data/processed_data_base_60/Re300.h5")
+        # Optional Re300 case check when configured processed dataset is available
+        from cylinder_flow.config import get_path_config
+
+        re300_path = get_path_config().processed_dir / "Re300.h5"
         if not re300_path.exists():
             return
         from cylinder_flow.data.h5 import load_re_case

@@ -10,7 +10,7 @@ Verifies:
 - FixedFlattenedAdapter wrapping and execution.
 - Checkpoint metadata contract generation, fingerprinting, and strict validation.
 
-Self-contained portable contract test suite (no external data files, no sibling repo dependencies).
+Self-contained portable contract test suite (no external data files).
 """
 
 from __future__ import annotations

@@ -3,8 +3,8 @@
 Validates:
 1. Bundled DeepSets checkpoint (examples/checkpoints/deepsets/best_model.pt) loading,
    schema v1 recognition, GELU activation, and contract fingerprint verification.
-2. Exact numerical parity vs historical reference module from commit 855a2c1
-   across multiple budgets (6, 12, 24, 48, 60), padding, and synchronized permutations.
+2. Self-consistent multi-budget inference (6, 12, 24, 48, 60), padding, Re/phase
+   decoding, and synchronized permutation invariance.
 3. Strict contract integrity: rejection of tampered fingerprints, mismatched candidate pools,
    and spoofed extra_metadata.
 4. Roundtrip serialization and deserialization for schema v1 (GELU) and schema v2 (ReLU).
@@ -70,54 +70,17 @@ from cylinder_flow.models.mlp import SensorMLP
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUNDLED_DEEPSETS_PATH = REPO_ROOT / "examples" / "checkpoints" / "deepsets" / "best_model.pt"
 BUNDLED_PPINN_PATH = REPO_ROOT / "examples" / "checkpoints" / "ppinn" / "best_ppinn.pt"
-OLD_REPO_PATH = Path(os.environ.get("OLD_REPO_PATH", str(REPO_ROOT.parent / "2d_surface_cylinder_flow")))
 EXPECTED_SCHEMA1_FP = "264a74b8283d84b4c0b11bc865cd3c896217c1095048f7cc3c64009e4c1df2a0"
 
 
-def _load_historical_855a2c1_module():
-    """Extract and import encoder_deepset.py from git commit 855a2c1."""
-    if not OLD_REPO_PATH.exists():
-        return None
-    git_dir = OLD_REPO_PATH / ".git"
-    # Read the history without asking Git to change into an external worktree.
-    git_location = [f"--git-dir={git_dir}"] if git_dir.is_dir() else ["-C", str(OLD_REPO_PATH)]
-    try:
-        cmd = ["git", *git_location, "show", "855a2c1:encoder_deepset.py"]
-        src = subprocess.check_output(cmd, encoding="utf-8", stderr=subprocess.DEVNULL)
-    except Exception:
-        return None
-
-    tmp = tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8")
-    try:
-        tmp.write(src)
-        tmp_path = tmp.name
-    finally:
-        tmp.close()
-
-    try:
-        spec = importlib.util.spec_from_file_location("historical_deepset_855a2c1", tmp_path)
-        if spec is None or spec.loader is None:
-            return None
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
-    finally:
-        if os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-
-
 class TestDeepSetsParity(unittest.TestCase):
-    """Test suite for DeepSets checkpoints, parity, and closed-loop inference."""
+    """Test suite for DeepSets checkpoints, consistency, and closed-loop inference."""
 
     @classmethod
     def setUpClass(cls) -> None:
         if not BUNDLED_DEEPSETS_PATH.exists():
             raise FileNotFoundError(f"Bundled checkpoint missing: {BUNDLED_DEEPSETS_PATH}")
         cls.package = load_deepsets_checkpoint(BUNDLED_DEEPSETS_PATH)
-        cls.hist_mod = _load_historical_855a2c1_module()
 
     def setUp(self) -> None:
         self.package.model.to("cpu")
@@ -150,35 +113,12 @@ class TestDeepSetsParity(unittest.TestCase):
         self.assertTrue(torch.allclose(pkg.model.chan_mean.cpu().reshape(-1), cm_meta, atol=1e-5))
         self.assertTrue(torch.allclose(pkg.model.chan_std.cpu().reshape(-1), cs_meta, atol=1e-5))
 
-    def test_numerical_parity_against_855a2c1_reference(self) -> None:
-        """Verify bit-level parity against historical 855a2c1 module over multiple budgets."""
-        if self.hist_mod is None:
-            self.skipTest("Historical commit 855a2c1 reference module not available.")
-
-        ckpt = torch.load(BUNDLED_DEEPSETS_PATH, map_location="cpu", weights_only=False)
-        old_model = self.hist_mod.DynamicSetSensorEncoder(
-            candidate_count=ckpt["candidate_count"],
-            embed_dim=ckpt["set_embed_dim"],
-            phi_hidden=ckpt["set_phi_hidden"],
-            rho_hidden=ckpt["set_rho_hidden"],
-            out_dim=3,
-            pool=ckpt["pool"],
-            count_feature=ckpt["count_feature"],
-            position_encoding=ckpt["position_encoding"],
-            chan_mean=ckpt["chan_mean"],
-            chan_std=ckpt["chan_std"],
-        )
-        old_model.load_state_dict(ckpt["model_state_dict"], strict=True)
-        old_model.eval()
-
+    def test_bundled_checkpoint_multi_budget_inference_and_permutation(self) -> None:
+        """Verify multi-budget inference, Re/phase decoding, padding, and permutation invariance."""
         new_model = self.package.model
         cand_pos = self.package.candidate_positions
 
         budgets = [6, 12, 24, 48, 60]
-        max_raw_diff = 0.0
-        max_re_diff = 0.0
-        max_phi_diff = 0.0
-
         rng = np.random.RandomState(42)
 
         for k in budgets:
@@ -198,24 +138,16 @@ class TestDeepSetsParity(unittest.TestCase):
             v_t, p_t, m_t, c_t = batch.to_tensors(device="cpu")
 
             with torch.no_grad():
-                out_old = old_model.forward_tokens(v_t, p_t, m_t, c_t).cpu().numpy().astype(np.float64)
-                out_new = new_model.forward_tokens(v_t, p_t, m_t, c_t).cpu().numpy().astype(np.float64)
+                out_raw = new_model.forward_tokens(v_t, p_t, m_t, c_t).cpu().numpy().astype(np.float64)
 
-            raw_err = np.max(np.abs(out_old - out_new))
-            max_raw_diff = max(max_raw_diff, float(raw_err))
-            self.assertLess(raw_err, 1e-7, f"Raw output disparity for budget {k}: {raw_err}")
-
-            # Verify physical Re and circular phase parity through full inference API
+            # Verify physical Re and circular phase decoding match direct model output
             pred_new = predict_re_phase_full(self.package, batch, device="cpu")
-            old_re = self.package.re_normalizer.inverse_transform(out_old[:, 0])
-            old_phi = wrap_phase(np.arctan2(out_old[:, 1], out_old[:, 2]))
+            ref_re = self.package.re_normalizer.inverse_transform(out_raw[:, 0])
+            ref_phi = wrap_phase(np.arctan2(out_raw[:, 1], out_raw[:, 2]))
 
-            re_err = np.max(np.abs(old_re - pred_new.re))
-            phi_diff = np.abs(old_phi - pred_new.phase)
+            re_err = np.max(np.abs(ref_re - pred_new.re))
+            phi_diff = np.abs(ref_phi - pred_new.phase)
             phi_err = np.max(np.minimum(phi_diff, 2.0 * np.pi - phi_diff))
-
-            max_re_diff = max(max_re_diff, float(re_err))
-            max_phi_diff = max(max_phi_diff, float(phi_err))
 
             self.assertLess(re_err, 1e-5, f"Re error for budget {k}: {re_err}")
             self.assertLess(phi_err, 1e-6, f"Phase circular error for budget {k}: {phi_err}")
@@ -231,12 +163,6 @@ class TestDeepSetsParity(unittest.TestCase):
             pred_perm = predict_re_phase_full(self.package, batch_perm, device="cpu")
             self.assertTrue(np.allclose(pred_new.re, pred_perm.re, atol=1e-6))
             self.assertTrue(np.allclose(pred_new.phase, pred_perm.phase, atol=1e-6))
-
-        # Output max discrepancy across all tested budgets
-        print(
-            f"\n[855a2c1 Parity Summary] Tested budgets={budgets}: "
-            f"max_raw_diff={max_raw_diff:.2e}, max_re_diff={max_re_diff:.2e}, max_phi_diff={max_phi_diff:.2e}"
-        )
 
     def test_tampered_and_malformed_contract_rejection(self) -> None:
         """Verify strict rejection of altered contract fingerprints and pool mismatch."""

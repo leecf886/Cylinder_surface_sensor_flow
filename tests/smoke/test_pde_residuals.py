@@ -1,4 +1,4 @@
-"""Smoke and numerical parity tests for Navier-Stokes PDE residuals (Phase 8c-1)."""
+"""Smoke and analytical consistency tests for Navier-Stokes PDE residuals."""
 from __future__ import annotations
 
 import math

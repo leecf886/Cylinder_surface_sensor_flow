@@ -419,53 +419,6 @@ class TestAblationParity(unittest.TestCase):
             self.assertEqual(enc_pred.re.shape, (nt,))
             self.assertEqual(enc_pred.phase.shape, (nt,))
 
-    def test_read_real_legacy_checkpoints_all_8_variants(self) -> None:
-        """Inspect and verify loading across all 8 real trained legacy variant assets when available."""
-        v1_base = Path("E:/2d_cylinder_flow_data/wp_b_arch_ablation_relu_v1/02_train_prelock")
-        v2_base = Path("E:/2d_cylinder_flow_data/wp_b_arch_ablation_relu_v2_a8/02_train_prelock")
-
-        if not v1_base.exists():
-            self.skipTest(f"Real legacy model directory {v1_base} not accessible")
-
-        for vid in ARCH_ABLATION_VARIANT_IDS:
-            if vid == "arch_main_phi_slot_flat_mlp":
-                path = v2_base / vid / "repeat_0" / "best_model.pt"
-            else:
-                path = v1_base / vid / "repeat_0" / "best_model.pt"
-
-            if not path.exists():
-                continue
-
-            pkg = load_ablation_checkpoint(path)
-            self.assertIsInstance(pkg, AblationPackage)
-            self.assertEqual(pkg.arch_variant, vid)
-            self.assertEqual(pkg.candidate_count, ARCH_ABLATION_CANDIDATE_COUNT)
-            self.assertEqual(pkg.candidate_positions.shape, (60, 2))
-            self.assertTrue(pkg.x_normalizer.fitted)
-            self.assertEqual(pkg.x_normalizer.method, "none")
-            self.assertTrue(pkg.re_normalizer.fitted)
-
-            if vid == "arch_fourier_k2_ridge":
-                self.assertTrue(pkg.model.is_fitted)
-                self.assertGreater(pkg.fitted_exposure_count or 0, 0)
-                self.assertEqual(pkg.model.feature_mean.shape, (FOURIER_FEATURE_DIM,))
-                self.assertEqual(pkg.model.coef.shape, (FOURIER_FEATURE_DIM, 3))
-
-            # Run a lightweight forward check with synthetic values on package default sensor positions
-            k = pkg.nsensor
-            idx = pkg.default_sensor_indices
-            val = np.random.randn(2, k, 3).astype(np.float32)
-            pos = np.broadcast_to(pkg.candidate_positions[idx][None, :, :], (2, k, 2)).astype(np.float32).copy()
-            mask = np.ones((2, k), dtype=bool)
-            count = np.full((2, 1), float(k), dtype=np.float32)
-            batch = DynamicSensorBatch(values=val, pos=pos, mask=mask, count=count)
-
-            pred = predict_re_phase_full(model=pkg, sensor_inputs=batch)
-            self.assertEqual(pred.re.shape, (2,))
-            self.assertEqual(pred.phase.shape, (2,))
-            self.assertTrue(np.all(np.isfinite(pred.re)))
-            self.assertTrue(np.all(np.isfinite(pred.phase)))
-
 
 if __name__ == "__main__":
     unittest.main()

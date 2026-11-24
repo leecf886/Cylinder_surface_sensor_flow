@@ -1,4 +1,4 @@
-"""Contract and parity tests for collocation sampling and Re-Strouhal context (Phase 8c-1)."""
+"""Contract and numerical consistency tests for collocation sampling and Re-Strouhal context."""
 from __future__ import annotations
 
 import hashlib
@@ -192,7 +192,7 @@ class TestCollocationContracts(unittest.TestCase):
                 128, self.roi_bounds, self.train_re, cfg, st_ctx, rng_ref, self.mesh
             )
 
-            # Draw using migrated function
+            # Draw using package implementation
             rng_new = np.random.default_rng(10042)
             col_new, stats_new = sample_collocation_points(
                 128, self.roi_bounds, self.train_re, cfg, st_ctx, rng_new, self.mesh

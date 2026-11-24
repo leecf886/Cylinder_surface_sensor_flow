@@ -1,4 +1,4 @@
-"""Stage 10a integrated end-to-end smoke test: results -> aggregate -> stats -> plots."""
+"""Integrated end-to-end smoke test: results -> aggregate -> stats -> plots."""
 from __future__ import annotations
 
 import json

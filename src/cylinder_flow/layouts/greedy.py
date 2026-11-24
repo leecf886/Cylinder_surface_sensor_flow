@@ -357,7 +357,7 @@ def _fit_layout_mlp_with_trainer(
     variance_source: str = "model_train",
     evaluator: str = "mlp",
 ) -> Tuple[Dict[str, object], Dict[str, object]]:
-    """Train a SensorMLP on a fixed layout using Phase 7 MLPTrainer & SensorDataset."""
+    """Train a SensorMLP on a fixed layout using MLPTrainer & SensorDataset."""
     if evaluate_test_split and not allow_test:
         raise PermissionError("Test evaluation requires allow_test=True")
 

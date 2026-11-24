@@ -1,4 +1,4 @@
-"""Regression and numerical parity tests for Stage 8a: POD baseline model and training."""
+"""Regression and numerical consistency tests for POD baseline model and training."""
 from __future__ import annotations
 
 import importlib.util
@@ -314,75 +314,6 @@ class TestSyntheticPODFittingParity(unittest.TestCase):
         pred_ref = _independent_legacy_predict(ref_dict, s_test)
 
         np.testing.assert_allclose(pred_model, pred_ref, rtol=1e-9, atol=1e-9)
-
-
-class TestOptionalLegacyRepoParity(unittest.TestCase):
-    """Parity against actual legacy train_pod_model if legacy repo is present on workstation."""
-
-    def test_actual_legacy_train_eval_pod_parity_if_available(self) -> None:
-        legacy_dir_str = os.environ.get("LEGACY_REPO_DIR", "E:/code/2d_surface_cylinder_flow")
-        legacy_dir = Path(legacy_dir_str)
-        legacy_file = legacy_dir / "train_eval_pod_surface.py"
-        if not legacy_file.is_file():
-            self.skipTest(f"Legacy script not found at {legacy_file}")
-
-        str_dir = str(legacy_dir)
-        try:
-            if str_dir not in sys.path:
-                sys.path.insert(0, str_dir)
-            spec = importlib.util.spec_from_file_location("legacy_pod_mod", str(legacy_file))
-            if spec is None or spec.loader is None:
-                self.skipTest("Could not create import spec for legacy script")
-            mod = importlib.util.module_from_spec(spec)
-            sys.modules["legacy_pod_mod"] = mod
-            spec.loader.exec_module(mod)
-        except Exception as e:
-            self.skipTest(f"Could not load legacy script: {e}")
-        finally:
-            if str_dir in sys.path:
-                sys.path.remove(str_dir)
-
-        legacy_train_fn = getattr(mod, "train_pod_model", None)
-        legacy_cfg_cls = getattr(mod, "PODConfig", None)
-        if legacy_train_fn is None or legacy_cfg_cls is None:
-            self.skipTest("train_pod_model or PODConfig not found in legacy script")
-
-        rng = np.random.default_rng(1234)
-        n_samples = 15
-        n_sensors = 6
-        n_points = 12
-
-        s_train = rng.standard_normal((n_samples, n_sensors * 3))
-        x_field = rng.standard_normal((n_samples, n_points * 3))
-        s_test = rng.standard_normal((5, n_sensors * 3))
-
-        # Train legacy model
-        legacy_cfg = legacy_cfg_cls(
-            ridge_lambda=1e-5,
-            energy_ratio=0.98,
-            min_modes=3,
-            max_modes=8,
-            x_norm_method="standard",
-        )
-        legacy_model = legacy_train_fn(s_train, x_field, legacy_cfg)
-        pred_legacy = legacy_model.predict_flat(s_test)
-
-        # Train new model
-        new_cfg = PODTrainingConfig(
-            ridge_lambda=1e-5,
-            energy_ratio=0.98,
-            min_modes=3,
-            max_modes=8,
-            x_norm_method="standard",
-        )
-        new_model = train_surface_pod(
-            X_train_field=x_field,
-            S_train_sensor=s_train,
-            config=new_cfg,
-        )
-        pred_new = new_model.predict(s_test)
-
-        np.testing.assert_allclose(pred_new, pred_legacy, rtol=1e-9, atol=1e-9)
 
 
 class TestExplicitArgumentOrderAnd3DShapes(unittest.TestCase):

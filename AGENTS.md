@@ -5,24 +5,16 @@ Physics-informed pipeline: Fluent H5 -> preprocess -> Encoder (sensor->Re,phase)
 
 ## Environment & Execution Rules
 
-### Active Environment (Local Workstation Context)
-> **Note**: The following paths provide local workstation context. When preparing for public open-source release, local drive letters will be pruned.
-- **Conda Environment**: `surface_cylinder_flow`
-- **Local Python Interpreter**: `D:\anaconda_envs\surface_cylinder_flow\python.exe`
-- **Local Data Root**: `E:/2d_cylinder_flow_data`
-- **Default Processed Data**: `E:/2d_cylinder_flow_data/processed_data_base_60`
-- **Checkpoints & Runs Root**: `E:/2d_cylinder_flow_data/runs`
-
-### Execution Guideline
-- Prefer executing via active conda environment:
+### Python Environment
+- **Recommended Conda Environment**: `surface_cylinder_flow` (see `environment.yml`)
+- Prefer executing via the active virtual/conda environment, e.g.:
   `conda run -n surface_cylinder_flow python <script.py> <args>`
-  or explicit interpreter:
-  `D:\anaconda_envs\surface_cylinder_flow\python.exe <script.py> <args>`
-- NEVER use bare `python` or `python3` if multiple system interpreters exist.
+  or an explicit environment interpreter path.
+- Avoid invoking an unintended system `python` when multiple interpreters are installed.
 
 ### Path Resolution
-- NEVER hardcode absolute paths (`E:/...` or `D:/...`) in `src/cylinder_flow/`.
-- All paths must resolve through `cylinder_flow.config.get_path_config()`, CLI `--data-dir` arguments, or `configs/paths.json`.
+- NEVER hardcode machine-specific absolute paths in `src/cylinder_flow/`.
+- All paths must resolve through `cylinder_flow.config.get_path_config()`, CLI `--data-dir` arguments, `CYLINDER_DATA_ROOT`, or local `configs/paths.json`.
 
 ---
 

@@ -1,4 +1,4 @@
-"""Stage 10d smoke tests for Work Package C (WP-C) robustness workflow."""
+"""Smoke tests for Work Package C (WP-C) robustness workflow."""
 from __future__ import annotations
 
 import csv

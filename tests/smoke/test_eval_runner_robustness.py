@@ -554,7 +554,7 @@ class TestNoiseScaleAndMissingSensorRobustness:
         assert math.isfinite(res_perturbed.overall["overall_rel_l2"])
         assert res_perturbed.metadata["noise_rel_std"] == 0.05
         assert res_perturbed.metadata["n_drop"] == 2
-        # Verify add_sensor_noise direct import works (Phase 8b preserved)
+        # Verify add_sensor_noise direct import works
         noisy_arr = add_sensor_noise(
             c450.get_sensors(sensor_idx, flatten=False),
             rel_std=0.05,

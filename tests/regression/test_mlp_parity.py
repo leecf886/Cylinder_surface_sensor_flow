@@ -1,4 +1,4 @@
-"""Regression and numerical parity tests for Stage 4: SensorMLP inference & checkpoint adaptation."""
+"""Regression and numerical consistency tests for SensorMLP inference & checkpoint adaptation."""
 from __future__ import annotations
 
 import math
@@ -216,7 +216,7 @@ class TestInferenceParityAndSanity(unittest.TestCase):
         legacy_re = self.package.re_normalizer.inverse_transform(net_out[:, 0]).astype(np.float64)
         legacy_phi = wrap_phase(np.arctan2(net_out[:, 1], net_out[:, 2])).astype(np.float64)
 
-        # 3. Assert machine precision parity (< 1e-6 required by REFACTOR.md)
+        # 3. Assert machine-precision inference consistency (< 1e-6)
         max_re_err = float(np.max(np.abs(re_pred - legacy_re)))
         max_phi_err = float(np.max(np.abs(phase_diff_circular(phi_pred, legacy_phi))))
 

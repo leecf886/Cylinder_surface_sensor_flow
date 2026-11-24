@@ -35,41 +35,21 @@ from cylinder_flow.training.dynamic_validation import (
     score_layout_batch,
 )
 
-OLD_REPO_PATH = Path("E:/code/2d_surface_cylinder_flow")
 
+class TestDynamicValidationPanelContracts:
+    """Contract tests for frozen dynamic validation panel construction."""
 
-def _try_import_legacy():
-    if OLD_REPO_PATH.exists() and str(OLD_REPO_PATH) not in sys.path:
-        sys.path.insert(0, str(OLD_REPO_PATH))
-    try:
-        import sensor_perturb as old_sensor_perturb  # type: ignore[import-not-found]
-        import train_mlp_re_phase as old_train_mlp  # type: ignore[import-not-found]
-        return old_train_mlp, old_sensor_perturb
-    except ImportError:
-        return None, None
+    def test_panel_generation_deterministic(self) -> None:
+        """Verify build_dynamic_validation_panel(60) is deterministic and has 32 layouts."""
+        panel_a = build_dynamic_validation_panel(60)
+        panel_b = build_dynamic_validation_panel(60)
 
-
-class TestDynamicValidationPanelParity:
-    """Parity tests against legacy implementation for frozen panel building."""
-
-    def test_panel_generation_parity_with_legacy(self) -> None:
-        """Compare build_dynamic_validation_panel(60) byte-for-byte with old repo."""
-        old_mlp, _ = _try_import_legacy()
-        if old_mlp is None:
-            pytest.skip("Old repository E:/code/2d_surface_cylinder_flow not available")
-
-        panel_old = old_mlp.build_dynamic_validation_panel(60)
-        panel_new = build_dynamic_validation_panel(60)
-
-        assert panel_new["schema_version"] == panel_old["schema_version"]
-        assert panel_new["panel_seed"] == panel_old["panel_seed"]
-        assert panel_new["candidate_count"] == panel_old["candidate_count"]
-        assert panel_new["budgets"] == panel_old["budgets"]
-        assert panel_new["candidate_fingerprint"] == panel_old["candidate_fingerprint"]
-        assert len(panel_new["layouts"]) == len(panel_old["layouts"]) == 32
-
-        for i, (l_new, l_old) in enumerate(zip(panel_new["layouts"], panel_old["layouts"])):
-            assert l_new == l_old, f"Mismatch at layout {i}: {l_new} vs {l_old}"
+        assert panel_a == panel_b
+        assert panel_a["schema_version"] == DYNAMIC_VALIDATION_PANEL_SCHEMA
+        assert panel_a["panel_seed"] == DYNAMIC_VALIDATION_PANEL_SEED
+        assert panel_a["candidate_count"] == DYNAMIC_VALIDATION_PANEL_CANDIDATE_COUNT
+        assert panel_a["budgets"] == list(DYNAMIC_VALIDATION_PANEL_BUDGETS)
+        assert len(panel_a["layouts"]) == len(DYNAMIC_VALIDATION_PANEL_BUDGETS) * DYNAMIC_VALIDATION_PANEL_LAYOUTS_PER_BUDGET == 32
 
     def test_panel_generator_candidate_count_guard(self) -> None:
         """Verify panel generator rejects candidate_count != 60."""
@@ -77,60 +57,52 @@ class TestDynamicValidationPanelParity:
             build_dynamic_validation_panel(30)
 
 
-class TestSamplerAndCollatorParity:
-    """Parity tests for subset sampler and batch collator against legacy code."""
+class TestSamplerAndCollatorDeterminism:
+    """Determinism tests for subset sampler and dynamic batch collator."""
 
-    def test_sampler_sequence_and_snapshot_parity(self) -> None:
-        """Verify BalancedRandomSubsetSampler draws identical sequences and snapshots."""
-        old_mlp, _ = _try_import_legacy()
-        if old_mlp is None:
-            pytest.skip("Old repository not available")
-
-        s_old = old_mlp.BalancedRandomSubsetSampler(
+    def test_sampler_sequence_and_snapshot_reproducible(self) -> None:
+        """Verify BalancedRandomSubsetSampler draws identical sequences for identical seeds."""
+        s_a = BalancedRandomSubsetSampler(
             candidate_count=60,
             sensor_counts=[6, 12, 24, 48],
             seed=400042,
         )
-        s_new = BalancedRandomSubsetSampler(
+        s_b = BalancedRandomSubsetSampler(
             candidate_count=60,
             sensor_counts=[6, 12, 24, 48],
             seed=400042,
         )
 
         for step in range(80):
-            k_old, idx_old = s_old.sample()
-            k_new, idx_new = s_new.sample()
-            assert k_new == k_old, f"Step {step} k mismatch"
-            assert np.array_equal(idx_new, idx_old), f"Step {step} idx mismatch"
+            k_a, idx_a = s_a.sample()
+            k_b, idx_b = s_b.sample()
+            assert k_a == k_b, f"Step {step} k mismatch"
+            assert np.array_equal(idx_a, idx_b), f"Step {step} idx mismatch"
 
-        assert s_new.snapshot() == s_old.snapshot()
+        assert s_a.snapshot() == s_b.snapshot()
 
-    def test_collator_and_noise_parity(self) -> None:
-        """Verify DynamicBatchCollator and add_training_sensor_noise match legacy."""
-        old_mlp, old_sp = _try_import_legacy()
-        if old_mlp is None or old_sp is None:
-            pytest.skip("Old repository not available")
-
+    def test_collator_and_noise_reproducible(self) -> None:
+        """Verify DynamicBatchCollator produces identical outputs and snapshots for identical seeds."""
         cand_count = 60
         chan_std = np.array([0.45, 0.38, 1.15], dtype=np.float32)
 
-        s_old = old_mlp.BalancedRandomSubsetSampler(cand_count, [6, 12], seed=101)
-        s_new = BalancedRandomSubsetSampler(cand_count, [6, 12], seed=101)
+        s_a = BalancedRandomSubsetSampler(cand_count, [6, 12], seed=101)
+        s_b = BalancedRandomSubsetSampler(cand_count, [6, 12], seed=101)
 
-        c_old = old_mlp.DynamicBatchCollator(
+        c_a = DynamicBatchCollator(
             candidate_count=cand_count,
             global_sensor_indices=list(range(cand_count)),
-            layout_sampler=s_old,
+            layout_sampler=s_a,
             token_dropout_prob=0.15,
             token_dropout_seed=202,
             sensor_noise_rel_std=0.08,
             sensor_noise_seed=303,
             channel_std=chan_std,
         )
-        c_new = DynamicBatchCollator(
+        c_b = DynamicBatchCollator(
             candidate_count=cand_count,
             global_sensor_indices=list(range(cand_count)),
-            layout_sampler=s_new,
+            layout_sampler=s_b,
             token_dropout_prob=0.15,
             token_dropout_seed=202,
             sensor_noise_rel_std=0.08,
@@ -154,18 +126,18 @@ class TestSamplerAndCollatorParity:
             for _ in range(3)
         ]
 
-        out_old = c_old(batch)
-        out_new = c_new(batch)
+        out_a = c_a(batch)
+        out_b = c_b(batch)
 
-        for i, (t_old, t_new) in enumerate(zip(out_old, out_new)):
-            if isinstance(t_old, torch.Tensor):
-                assert torch.allclose(t_new, t_old, atol=1e-6), f"Collator output {i} mismatch"
+        for i, (t_a, t_b) in enumerate(zip(out_a, out_b)):
+            if isinstance(t_a, torch.Tensor):
+                assert torch.allclose(t_b, t_a, atol=1e-6), f"Collator output {i} mismatch"
 
-        assert c_new.snapshot() == c_old.snapshot()
+        assert c_b.snapshot() == c_a.snapshot()
 
 
 class TestDynamicValidationAggregation:
-    """Tests for aggregate_dynamic_validation_cells: parity, math, and guards."""
+    """Tests for aggregate_dynamic_validation_cells: math and guards."""
 
     def _build_synthetic_grid(self, panel: Dict[str, object], val_res: Sequence[int]) -> List[Dict[str, object]]:
         raw_cells: List[Dict[str, object]] = []
@@ -186,34 +158,6 @@ class TestDynamicValidationAggregation:
                     }
                 )
         return raw_cells
-
-    def test_aggregation_parity_against_legacy(self) -> None:
-        """Verify aggregate_dynamic_validation_cells matches legacy output identically."""
-        old_mlp, _ = _try_import_legacy()
-        if old_mlp is None:
-            pytest.skip("Old repository not available")
-
-        panel = build_dynamic_validation_panel(60)
-        raw_cells = self._build_synthetic_grid(panel, [450, 800])
-
-        agg_old = old_mlp.aggregate_dynamic_validation_cells(raw_cells, panel, split_name="val")
-        agg_new = aggregate_dynamic_validation_cells(
-            raw_cells,
-            panel,
-            split_name="val",
-            declared_val_re=[450, 800],
-        )
-
-        assert agg_new["val_equal_budget_selection_score"] == pytest.approx(
-            agg_old["val_equal_budget_selection_score"]
-        )
-        assert agg_new["schema_version"] == DYNAMIC_VALIDATION_AGGREGATION_SCHEMA
-
-        for budget_str in ["6", "12", "24", "48"]:
-            b_old = agg_old["by_budget"][budget_str]
-            b_new = agg_new["by_budget"][budget_str]
-            for metric in DYNAMIC_VALIDATION_METRICS:
-                assert b_new[metric] == pytest.approx(b_old[metric])
 
     def test_aggregation_independent_hand_calculation(self) -> None:
         """Verify hierarchical macro weighting: equal layout -> equal Re -> equal budget."""

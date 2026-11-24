@@ -72,7 +72,7 @@ SUPPORTED_SELECTION_METRICS: Dict[str, str] = {
 
 
 def derive_ppinn_sampling_seeds(base_seed: int) -> Dict[str, int]:
-    """Derive deterministic seeds matching legacy train_ppinn_parametric protocol.
+    """Derive deterministic seeds for reproducible pPINN training.
 
     Parameters:
         base_seed: Master integer random seed.

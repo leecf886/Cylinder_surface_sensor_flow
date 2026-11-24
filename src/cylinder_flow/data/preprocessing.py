@@ -1,2 +1,5 @@
-"""Fluent export data conversion to standard H5 mesh and case files."""
-# Corresponds to fluent_to_pinn_h5.py logic
+"""Placeholder for external CFD-to-HDF5 preprocessing utilities.
+
+This package consumes pre-formatted ``mesh.h5`` and ``ReXXX.h5`` files conforming
+to the schema specified in ``docs/data_format.md``.
+"""
