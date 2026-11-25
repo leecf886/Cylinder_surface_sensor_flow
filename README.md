@@ -148,6 +148,16 @@ cylinder_surface_sensor_flow/
 
 所有内置资产的 SHA-256 校验和与字节数均登记在 [`examples/artifacts.json`](examples/artifacts.json) 中。完整非定常工况数据（`ReXXX.h5`）因体积较大外置存放，字段格式详见 [`docs/data_format.md`](docs/data_format.md)。
 
+### 核心架构代码阅读指引（跳过工程外框，直达神经网络）
+
+若仅想快速理解本项目的神经网络设计与物理闭环原理，**可直接跳过** `data/`、`layouts/`、`evaluation/`、`analysis/`、`artifacts/` 与 `workflows/`，按以下 3 步直达核心类（其余长文件中的校验/序列化样板代码可忽略）：
+
+| 步序 | 文件与核心类（含行号） | 重点关注内容 | 可跳过的冗余部分 |
+| :--- | :--- | :--- | :--- |
+| **1. 固定布局编码器** | [`mlp.py`](src/cylinder_flow/models/mlp.py#L14-L108) — `SensorMLP` | `[B, 3K]` 展平传感器输入 $\to [Re_{\text{norm}}, \sin\phi, \cos\phi]$ 回归（`__init__`、`forward`） | 无（可直接通读） |
+| **2. 置换不变编码器 (DeepSets)** | [`deepsets.py`](src/cylinder_flow/models/deepsets.py#L69-L170) — `SetSensorEncoder`（固定点数）<br/>[`deepsets.py`](src/cylinder_flow/models/deepsets.py#L726-L800) — `DynamicSensorBatch`<br/>[`deepsets.py`](src/cylinder_flow/models/deepsets.py#L894-L1057) — `DynamicSetSensorEncoder`（动态点数）<br/>[`deepsets.py`](src/cylinder_flow/models/deepsets.py#L1060-L1100) — `FixedFlattenedAdapter` | `(cos θ, sin θ)` 位置编码、padding `mask`、集合池化（`mean`/`sum`/`max`/`mean+max`）与测点比例特征 `n/N_cand`（重点看 `forward_tokens` `L988–L1032`） | `L173–L722`（索引/契约指纹校验）与 `L1107–L1175`（几何读取） |
+| **3. pPINN、PDE 残差与闭环串联** | [`ppinn.py`](src/cylinder_flow/models/ppinn.py#L16-L140) — `PPINNModel`<br/>[`residuals.py`](src/cylinder_flow/physics/residuals.py#L89-L187) — `compute_pde_residuals`<br/>[`reconstruction.py`](src/cylinder_flow/inference/reconstruction.py#L172-L245) — `reconstruct_field_closed_loop` | `PPINNModel.forward` 内部 `(x/D, y/D, Re_norm, sin φ, cos φ)` 映射；二阶自动微分 NS 动量/连续性残差；编码器与 pPINN 的两阶段闭环前向串联 | `training/` 训练外框、`reconstruct_case_*` 包装 |
+
 ---
 
 ## 3. 环境配置指引（Environment Setup）
